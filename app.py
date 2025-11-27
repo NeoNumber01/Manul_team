@@ -4,6 +4,7 @@ import hashlib
 import pandas as pd
 import streamlit as st
 import pydeck as pdk
+import networkx as nx
 from rdflib import Graph, Literal, Namespace, URIRef
 from rdflib.namespace import RDF
 
@@ -418,6 +419,7 @@ def main() -> None:
         st.session_state["show_edges"] = False
     if st.sidebar.button("Show rail lines"):
         st.session_state["show_edges"] = not st.session_state["show_edges"]
+    # Accessibility disabled
 
     show_controls = st.session_state["show_dense_options"]
     hex_radius = 6000
@@ -503,6 +505,8 @@ def main() -> None:
                                 )
                     if records:
                         edges_for_map = pd.DataFrame(records)
+                access_points = pd.DataFrame()
+                access_lines = pd.DataFrame()
 
                 center_lat = float(stops_for_map["stop_lat"].mean())
                 center_lon = float(stops_for_map["stop_lon"].mean())
@@ -551,17 +555,6 @@ def main() -> None:
                             width_min_pixels=1,
                             opacity=0.35,
                             get_color=[59, 130, 246, 160],
-                        )
-                    )
-                if show_stop_points:
-                    layers.append(
-                        pdk.Layer(
-                            "ScatterplotLayer",
-                            data=stops_for_map,
-                            get_position=["stop_lon", "stop_lat"],
-                            get_radius=60,
-                            get_fill_color=[0, 0, 0, 120],
-                            pickable=True,
                         )
                     )
                 if show_stop_points:
