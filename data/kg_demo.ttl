@@ -1,9 +1,0 @@
-@prefix ns1: <http://example.org/ont/> .
-
-ns1:Stop_A a ns1:Stop ;
-    ns1:nextStop ns1:Stop_B ;
-    ns1:stopName "Hauptbahnhof" .
-
-ns1:Stop_B a ns1:Stop ;
-    ns1:stopName "Universität" .
-
