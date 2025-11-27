@@ -1,147 +1,114 @@
-from pathlib import Path
-import hashlib
-
 import streamlit as st
-from rdflib import Graph, Literal, Namespace, URIRef
-from rdflib.namespace import RDF
+from streamlit_folium import st_folium
+import folium
 
-from src.gtfs_loader import load_stops_from_gtfs_zip
-from src.kg_builder import build_kg_from_stops
+# 👇 引用刚才拆分出去的核心模块
+from core.traffic_system import TrafficSystem
 
-st.set_page_config(page_title="Transit Knowledge Graph Demo", layout="wide")
-
-DATA_DIR = Path(__file__).parent / "data"
-KG_CACHE_PATH = DATA_DIR / "kg_demo.ttl"
-
-ONT = Namespace("http://example.org/ont/")
-
-DEFAULT_SPARQL = """
-PREFIX ont: <http://example.org/ont/>
-SELECT ?s ?name ?next
-WHERE {
-  ?s a ont:Stop .
-  OPTIONAL { ?s ont:stopName ?name . }
-  OPTIONAL { ?s ont:nextStop ?next . }
-}
-"""
+st.set_page_config(layout="wide", page_title="PageRank Traffic Impact")
 
 
-GTFS_SPARQL = """
-PREFIX ont: <http://example.org/ont/>
-SELECT ?s ?id ?name ?lat ?lon
-WHERE {
-  ?s a ont:Stop .
-  OPTIONAL { ?s ont:stopId ?id . }
-  OPTIONAL { ?s ont:stopName ?name . }
-  OPTIONAL { ?s ont:lat ?lat . }
-  OPTIONAL { ?s ont:lon ?lon . }
-}
-LIMIT 200
-"""
+# === 1. 初始化系统 ===
+@st.cache_resource
+def load_system():
+    return TrafficSystem()
 
 
-def load_or_create_kg(path: Path) -> tuple[Graph, bool]:
-    """Load a KG from TTL if present, else create the toy KG and persist it."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    graph = Graph()
-    if path.exists():
-        graph.parse(path, format="turtle")
-        return graph, True
+system = load_system()
 
-    graph.bind("ont", ONT)
-    stop_a = URIRef(ONT["Stop_A"])
-    stop_b = URIRef(ONT["Stop_B"])
+# === 2. 状态管理 ===
+if "selected_node" not in st.session_state:
+    st.session_state.selected_node = None
 
-    graph.add((stop_a, RDF.type, ONT.Stop))
-    graph.add((stop_b, RDF.type, ONT.Stop))
-    graph.add((stop_a, ONT.stopName, Literal("Hauptbahnhof")))
-    graph.add((stop_b, ONT.stopName, Literal("Universität")))
-    graph.add((stop_a, ONT.nextStop, stop_b))
+# === 3. 侧边栏 UI ===
+with st.sidebar:
+    st.title("🛡️ 交通韧性分析")
+    st.caption("基于 PageRank 算法的故障影响评估")
 
-    graph.serialize(destination=path, format="turtle")
-    return graph, False
+    if st.session_state.selected_node:
+        node = st.session_state.selected_node
+        status = system.get_station_status(node)
 
+        st.divider()
+        st.header(node)
 
-def load_gtfs_kg(gtfs_zip_bytes: bytes) -> tuple[Graph, bool, Path]:
-    """Load GTFS-derived KG from cache if available, else build and persist it."""
-    digest = hashlib.sha256(gtfs_zip_bytes).hexdigest()
-    cache_path = DATA_DIR / f"kg_gtfs_{digest[:12]}.ttl"
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
+        # 核心指标
+        st.metric("PageRank (节点重要性)", f"{status['rank']:.4f}")
 
-    graph = Graph()
-    if cache_path.exists():
-        graph.parse(cache_path, format="turtle")
-        return graph, True, cache_path
+        # 智能变色逻辑
+        if status['impact'] > 150:
+            color, msg = "inverse", "⚠️ 严重网络冲击"
+        elif status['impact'] > 50:
+            color, msg = "normal", "⚡ 中等影响"
+        else:
+            color, msg = "off", "✅ 低影响"
 
-    stops_df = load_stops_from_gtfs_zip(gtfs_zip_bytes)
-    graph = build_kg_from_stops(stops_df, ONT)
-    graph.serialize(destination=cache_path, format="turtle")
-    return graph, False, cache_path
+        st.metric("实时延误", f"{status['delay']:.1f} min")
+        st.metric("Impact Index", f"{status['impact']:.1f}", delta=msg, delta_color=color)
 
+        st.write("---")
+        if node == "Frankfurt Hbf":
+            st.warning("法兰克福是高权重枢纽，延误将导致全网瘫痪。")
+        elif node == "Heilbronn Hbf":
+            st.info("海尔布隆权重较低，延误影响仅限于局部。")
+    else:
+        st.info("👈 请点击地图上的站点查看分析")
 
-def main() -> None:
-    st.title("Transit Knowledge Graph — Minimal Demo (RDFLib + SPARQL)")
+# === 4. 地图 UI ===
+st.subheader("🇩🇪 德国铁路关键节点拓扑图")
 
-    st.sidebar.subheader("Static Data (GTFS)")
-    uploaded_gtfs = st.sidebar.file_uploader("Upload GTFS zip", type=["zip"])
-    use_demo_kg = st.sidebar.checkbox("Use demo KG", value=True)
+m = folium.Map(location=[50.5, 10.0], zoom_start=6, tiles="CartoDB dark_matter")
 
-    kg: Graph | None = None
-    kg_label = "Demo KG"
-    default_query = DEFAULT_SPARQL
-    status_msg = ""
+# A. 绘制节点
+for name, coords in system.stations.items():
+    status = system.get_station_status(name)
 
-    prefer_gtfs = uploaded_gtfs is not None and not use_demo_kg
-    if prefer_gtfs and uploaded_gtfs is not None:
-        try:
-            gtfs_bytes = uploaded_gtfs.getvalue()
-            kg, loaded_from_cache, cache_path = load_gtfs_kg(gtfs_bytes)
-            kg_label = "GTFS KG"
-            default_query = GTFS_SPARQL
-            status_msg = (
-                f"Loaded GTFS KG from cache: {cache_path}"
-                if loaded_from_cache
-                else f"Built GTFS KG and cached to: {cache_path}"
-            )
-        except Exception as exc:
-            st.error(f"Failed to load GTFS KG: {exc}")
-            st.info("Falling back to demo KG.")
+    # 颜色与半径逻辑
+    if status['impact'] > 150:
+        color = "#ff4b4b"  # 红
+    elif status['impact'] > 50:
+        color = "#ffa500"  # 橙
+    else:
+        color = "#00c0f2"  # 蓝
 
-    if kg is None:
-        kg, loaded_from_cache = load_or_create_kg(KG_CACHE_PATH)
-        status_msg = (
-            f"Loaded demo KG from cache: {KG_CACHE_PATH}"
-            if loaded_from_cache
-            else f"Created demo KG and saved to cache: {KG_CACHE_PATH}"
-        )
+    radius = status['rank'] * 1000
 
-    st.success(status_msg)
-    st.write(f"Using: **{kg_label}** | Triples: **{len(kg)}**")
+    folium.CircleMarker(
+        location=coords,
+        radius=max(5, radius),
+        color=color,
+        fill=True,
+        fill_color=color,
+        fill_opacity=0.8,
+        tooltip=f"{name} (Rank: {status['rank']:.3f})",
+        popup=None  # 禁用默认弹窗，确保点击事件能传回 Streamlit
+    ).add_to(m)
 
-    st.subheader("Local SPARQL Query")
-    sparql_query = st.text_area("SPARQL query", value=default_query, height=200)
+# B. 绘制连线 (仅选中时)
+if st.session_state.selected_node:
+    node = st.session_state.selected_node
+    status = system.get_station_status(node)
 
-    try:
-        results = kg.query(sparql_query)
-        rows = []
-        for r in results:
-            row_data = {str(k): v for k, v in r.asdict().items()}
-            rows.append(
-                {
-                    str(var): str(row_data.get(str(var))) if row_data.get(str(var)) is not None else ""
-                    for var in results.vars
-                }
-            )
+    for line in status['lines']:
+        line_color = "#ff4b4b" if status['delay'] > 10 else "#00c0f2"
+        folium.PolyLine(
+            locations=line['coords'],
+            color=line_color,
+            weight=3,
+            opacity=0.8,
+            tooltip=f"{node} -> {line['to']}"
+        ).add_to(m)
 
-        max_rows = 200
-        display_rows = rows[:max_rows]
-        if len(rows) > max_rows:
-            st.info(f"Showing first {max_rows} of {len(rows)} rows.")
+# === 5. 交互逻辑 ===
+output = st_folium(m, width=1000, height=600, key="main_map")
 
-        st.dataframe(display_rows, use_container_width=True)
-    except Exception as exc:
-        st.error(f"Query failed: {exc}")
+if output['last_object_clicked']:
+    clicked = output['last_object_clicked']
+    if 'tooltip' in clicked:
+        # 解析名字: "Frankfurt Hbf (Rank: ...)" -> "Frankfurt Hbf"
+        station_name = clicked['tooltip'].split(" (")[0]
 
-
-if __name__ == "__main__":
-    main()
+        if station_name in system.stations:
+            if st.session_state.selected_node != station_name:
+                st.session_state.selected_node = station_name
+                st.rerun()
