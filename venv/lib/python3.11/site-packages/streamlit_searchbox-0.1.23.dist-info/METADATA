@@ -1,0 +1,30 @@
+Metadata-Version: 2.4
+Name: streamlit-searchbox
+Version: 0.1.23
+Summary: Autocomplete Searchbox
+Home-page: https://github.com/m-wrzr/streamlit-searchbox
+Author: m-wrzr
+Requires-Python: >=3.9, !=3.9.7
+Description-Content-Type: text/plain
+License-File: LICENSE
+Requires-Dist: streamlit>=1.0
+Provides-Extra: tests
+Requires-Dist: wikipedia==1.4.0; extra == "tests"
+Requires-Dist: pytest==8.4.1; extra == "tests"
+Requires-Dist: playwright==1.54.0; extra == "tests"
+Requires-Dist: pytest-playwright==0.7.0; extra == "tests"
+Provides-Extra: dev
+Requires-Dist: pre-commit==4.3.0; extra == "dev"
+Requires-Dist: ruff==0.12.8; extra == "dev"
+Requires-Dist: pyright==1.1.403; extra == "dev"
+Dynamic: author
+Dynamic: description
+Dynamic: description-content-type
+Dynamic: home-page
+Dynamic: license-file
+Dynamic: provides-extra
+Dynamic: requires-dist
+Dynamic: requires-python
+Dynamic: summary
+
+Streamlit searchbox that dynamically updates and provides a list of suggestions based on a provided function
