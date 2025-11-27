@@ -4,6 +4,7 @@ import hashlib
 import pandas as pd
 import streamlit as st
 import pydeck as pdk
+import altair as alt
 from rdflib import Graph, Literal, Namespace, URIRef
 from rdflib.namespace import RDF
 
@@ -296,6 +297,21 @@ def load_gtfs_kg(
     )
 
 
+def format_time_hm(seconds: float) -> str:
+    """Formats seconds into a human-readable string like '1h 23m' or '45.1m'."""
+    if not isinstance(seconds, (int, float)) or seconds < 0:
+        return "0.0m"
+    minutes = seconds / 60.0
+    if minutes < 1:
+        # For times under a minute, show seconds
+        return f"{int(seconds)}s"
+    if minutes >= 60:
+        hours = int(minutes / 60)
+        rem_minutes = int(minutes % 60)
+        return f"{hours}h {rem_minutes}m"
+    return f"{minutes:.1f}m"
+
+
 def main() -> None:
     st.title("Transit Knowledge Graph — Minimal Demo (RDFLib + SPARQL)")
 
@@ -350,16 +366,17 @@ def main() -> None:
         st.stop()
 
     st.success(status_msg)
-    st.write(f"Using: **GTFS KG (bundled)** | GTFS path: {DEFAULT_GTFS_PATH} | Triples: **{len(kg)}**")
-    if edge_warning:
-        st.warning(edge_warning)
-    if edges_cache_path:
-        cache_state = (
-            "from cache"
-            if edges_from_cache
-            else ("built this run" if edges_df is not None else "missing (using KG edges)")
-        )
-        st.write(f"Edges cache: {edges_cache_path} ({cache_state})")
+    with st.expander("Show data source details"):
+        st.write(f"Using: **GTFS KG (bundled)** | GTFS path: {DEFAULT_GTFS_PATH} | Triples: **{len(kg)}**")
+        if edge_warning:
+            st.warning(edge_warning)
+        if edges_cache_path:
+            cache_state = (
+                "from cache"
+                if edges_from_cache
+                else ("built this run" if edges_df is not None else "missing (using KG edges)")
+            )
+            st.write(f"Edges cache: {edges_cache_path} ({cache_state})")
 
     # Cache paths for graph and pagerank
     cache_dir = DATA_DIR / "cache"
@@ -409,215 +426,252 @@ def main() -> None:
             pr, risk = compute_pagerank_and_risk(G)
             save_pagerank_cache(pr_cache_path, pr, risk)
 
-    st.subheader("Routing")
-    st.caption(
-        f"Routing mode: {'Fastest only (PageRank disabled)' if not ENABLE_PAGERANK else 'Fastest vs Robust'} | "
-        f"Graph nodes: {G.number_of_nodes()} | edges: {G.number_of_edges()} | "
-        f"Graph cache: {'cache' if graph_loaded_from_cache else 'rebuilt'}"
-        + ("" if not ENABLE_PAGERANK else f" | PageRank: {'cache' if pr_loaded_from_cache else 'computed'}")
-    )
+    tab_route, tab_sparql = st.tabs(["📍 Route Planning", "🔍 SPARQL Query"])
 
-    routing_enabled = st.checkbox("Enable routing demo", value=True)
-    if routing_enabled and (G.number_of_nodes() < 2 or G.number_of_edges() == 0):
-        st.warning("Routing graph has insufficient data (need at least 2 nodes and 1 edge).")
+    with tab_route:
+        st.subheader("Find the best route between two stations")
+        st.caption(
+            f"Routing mode: {'Fastest only (PageRank disabled)' if not ENABLE_PAGERANK else 'Fastest vs Robust'} | "
+            f"Graph nodes: {G.number_of_nodes()} | edges: {G.number_of_edges()} | "
+            f"Graph cache: {'cache' if graph_loaded_from_cache else 'rebuilt'}"
+            + ("" if not ENABLE_PAGERANK else f" | PageRank: {'cache' if pr_loaded_from_cache else 'computed'}")
+        )
 
-    if routing_enabled and G.number_of_nodes() >= 2 and G.number_of_edges() > 0:
-        def _label(station_key: str) -> str:
-            info = node_info.get(station_key)
-            if info and info.display_name:
-                return f"{info.display_name} ({station_key})"
-            return station_key
-
-        all_options = sorted(node_info.keys(), key=lambda sid: (node_info[sid].display_name or sid))
-        if len(all_options) < 2:
-            st.warning("Not enough stops to compute routes.")
+        if G.number_of_nodes() < 2 or G.number_of_edges() == 0:
+            st.warning("Routing graph has insufficient data (need at least 2 nodes and 1 edge).")
         else:
-            options_list = [(key, node_info[key].display_name or key) for key in all_options]
+            def _label(station_key: str) -> str:
+                info = node_info.get(station_key)
+                if info and info.display_name:
+                    return f"{info.display_name} ({station_key})"
+                return station_key
 
-            with st.form("route_form"):
-                src_id = station_picker(
-                    title="Start station",
-                    options=options_list,
-                    key_prefix="start",
-                    default_node=all_options[0],
-                )
-                dst_id = station_picker(
-                    title="End station",
-                    options=options_list,
-                    key_prefix="end",
-                    default_node=all_options[1] if len(all_options) > 1 else all_options[0],
-                )
-
-                submitted = st.form_submit_button("Compute route")
-
-            if ENABLE_PAGERANK:
-                lam = st.slider("Lambda (risk weight)", min_value=0.0, max_value=300.0, value=50.0, step=5.0)
+            all_options = sorted(node_info.keys(), key=lambda sid: (node_info[sid].display_name or sid))
+            if len(all_options) < 2:
+                st.warning("Not enough stops to compute routes.")
             else:
-                st.caption("Robust routing disabled (PageRank off).")
+                options_list = [(key, node_info[key].display_name or key) for key in all_options]
 
-            if submitted:
-                try:
-                    with st.spinner("Computing routes..."):
-                        fastest_path = shortest_path_fastest(G, src_id, dst_id)
-                        fastest_time_sec = path_total_time(G, fastest_path)
-                        top10 = {}
-                        robust_path = []
-                        robust_time_sec = 0.0
-                        fastest_hubs = 0
-                        robust_hubs = 0
-                        fastest_risk = 0.0
-                        robust_risk = 0.0
+                with st.form("route_form"):
+                    src_id = station_picker(
+                        title="Start station",
+                        options=options_list,
+                        key_prefix="start",
+                        default_node=all_options[0],
+                    )
+                    dst_id = station_picker(
+                        title="End station",
+                        options=options_list,
+                        key_prefix="end",
+                        default_node=all_options[1] if len(all_options) > 1 else all_options[0],
+                    )
 
-                        if ENABLE_PAGERANK:
-                            robust_path = shortest_path_robust(G, src_id, dst_id, risk, lam)
-                            robust_time_sec = path_total_time(G, robust_path)
-                            top10 = dict(sorted(pr.items(), key=lambda item: item[1], reverse=True)[:10])
-                            top10_ids = set(top10.keys())
-                            fastest_hubs = count_top_hubs_on_path(fastest_path, top10_ids)
-                            robust_hubs = count_top_hubs_on_path(robust_path, top10_ids)
-                            fastest_risk = path_risk_sum(risk, fastest_path)
-                            robust_risk = path_risk_sum(risk, robust_path)
-                except Exception as exc:  # noqa: BLE001
-                    st.error(f"Routing failed: {exc}")
+                    submitted = st.form_submit_button("Compute route")
+
+                if ENABLE_PAGERANK:
+                    lam = st.slider("Lambda (risk weight)", min_value=0.0, max_value=300.0, value=50.0, step=5.0)
                 else:
-                    def _fmt_minutes(sec: float) -> str:
-                        return f"{sec/60:.1f} min"
+                    st.caption("Robust routing disabled (PageRank off).")
 
-                    def _fmt_path(path: list[str]) -> str:
-                        return " \u2192 ".join(_label(sid) for sid in path) if path else "No path"
+                if submitted:
+                    try:
+                        with st.spinner("Computing routes..."):
+                            fastest_path = shortest_path_fastest(G, src_id, dst_id)
+                            fastest_time_sec = path_total_time(G, fastest_path)
+                            top10 = {}
+                            robust_path = []
+                            robust_time_sec = 0.0
+                            fastest_hubs = 0
+                            robust_hubs = 0
+                            fastest_risk = 0.0
+                            robust_risk = 0.0
 
-                    st.markdown("**Fastest route**")
-                    st.write(f"Total time: {_fmt_minutes(fastest_time_sec)}")
-                    st.write(f"Stops: {len(fastest_path)}")
-                    st.write(_fmt_path(fastest_path))
-
-                    # Build map and legs
-                    stop_lookup = build_stop_lookup(stops_df)
-                    node_to_stop_id = build_node_to_stop_id(node_info, stops_df)
-                    points_df = path_to_points_df(fastest_path, node_to_stop_id, stop_lookup)
-                    line_df = path_to_line_df(points_df)
-                    legs_df = build_legs_df(G, fastest_path, node_info)
-
-                    st.session_state["last_path_nodes"] = fastest_path
-                    st.session_state["last_points_df"] = points_df
-                    st.session_state["last_legs_df"] = legs_df
-
-                    if len(points_df) >= 2:
-                        points_df = points_df.copy()
-                        points_df["color"] = [[220, 0, 0, 220] for _ in range(len(points_df))]
-                        points_df["radius"] = 120
-                        points_df_de = filter_points_to_germany(points_df)
-                        if len(points_df_de) < len(points_df):
-                            st.caption("Some points were outside Germany and were ignored for framing.")
-                        points_df = points_df_de if len(points_df_de) >= 2 else points_df
-                        line_df = path_to_line_df(points_df)  # Rebuild line to match filtered points
-                        line_df["color"] = [[30, 120, 200, 220]]  # blue line
-                        view_state = compute_view_state(points_df)
-                        layers = [
-                            pdk.Layer(
-                                "PathLayer",
-                                data=line_df,
-                                get_path="path",
-                                get_width=6,
-                                width_min_pixels=6,
-                                rounded=True,
-                                opacity=0.85,
-                                get_color="color",
-                            ),
-                            pdk.Layer(
-                                "ScatterplotLayer",
-                                data=points_df,
-                                get_position=["lon", "lat"],
-                                get_radius="radius",
-                                get_fill_color="color",
-                                pickable=True,
-                            ),
-                        ]
-                        tooltip = {"text": "{idx}. {name}"}
-                        st.markdown("**Route map**")
-                        st.pydeck_chart(
-                            pdk.Deck(
-                                layers=layers,
-                                initial_view_state=view_state,
-                                tooltip=tooltip,
-                                map_style="https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
-                            ),
-                            use_container_width=True,
-                        )
+                            if ENABLE_PAGERANK:
+                                robust_path = shortest_path_robust(G, src_id, dst_id, risk, lam)
+                                robust_time_sec = path_total_time(G, robust_path)
+                                top10 = dict(sorted(pr.items(), key=lambda item: item[1], reverse=True)[:10])
+                                top10_ids = set(top10.keys())
+                                fastest_hubs = count_top_hubs_on_path(fastest_path, top10_ids)
+                                robust_hubs = count_top_hubs_on_path(robust_path, top10_ids)
+                                fastest_risk = path_risk_sum(risk, fastest_path)
+                                robust_risk = path_risk_sum(risk, robust_path)
+                    except Exception as exc:  # noqa: BLE001
+                        st.error(f"Routing failed: {exc}")
                     else:
-                        st.warning("Not enough coordinates to draw the route on the map.")
+                        def _fmt_path(path: list[str]) -> str:
+                            return " \u2192 ".join(_label(sid) for sid in path) if path else "No path"
 
-                    if not legs_df.empty:
-                        st.markdown("**Leg-by-leg details**")
-                        st.dataframe(legs_df, use_container_width=True)
-                    else:
-                        st.info("No leg details available.")
+                        # --- Display Results ---
+                        st.markdown("---")
+                        st.markdown("### Route Results")
 
-                    if ENABLE_PAGERANK and robust_path:
-                        col_fast, col_rob = st.columns(2)
-                        with col_fast:
-                            st.markdown("**Fastest (with risk stats)**")
-                            st.write(f"Total time: {_fmt_minutes(fastest_time_sec)}")
-                            st.write(f"Stops: {len(fastest_path)}")
-                            st.write(f"Risk sum: {fastest_risk:.3f}")
-                            st.write(f"Top-10 hubs visited: {fastest_hubs}")
-                            st.write(_fmt_path(fastest_path))
-                        with col_rob:
-                            st.markdown("**Robust**")
-                            st.write(f"Total time: {_fmt_minutes(robust_time_sec)}")
-                            st.write(f"Stops: {len(robust_path)}")
-                            st.write(f"Risk sum: {robust_risk:.3f}")
-                            st.write(f"Top-10 hubs visited: {robust_hubs}")
-                            st.write(_fmt_path(robust_path))
+                        metric_cols = st.columns(2)
+                        metric_cols[0].metric("Fastest Route Time", format_time_hm(fastest_time_sec))
+                        metric_cols[1].metric("Stops", len(fastest_path))
 
-                    if ENABLE_PAGERANK and top10:
-                        st.markdown("**Top-10 hubs (PageRank)**")
-                        hub_rows = []
-                        pr_scores = pr
-                        risk_scores = risk
-                        for sid, score in top10.items():
-                            info = node_info.get(sid)
-                            hub_rows.append(
-                                {
-                                    "station_key": sid,
-                                    "station_name": info.display_name if info else "",
-                                    "pagerank_score": score,
-                                    "risk": risk_scores.get(sid, 0.0),
-                                }
+                        # Build map and legs
+                        stop_lookup = build_stop_lookup(stops_df)
+                        node_to_stop_id = build_node_to_stop_id(node_info, stops_df)
+                        points_df = path_to_points_df(fastest_path, node_to_stop_id, stop_lookup)
+
+                        if len(points_df) >= 2:
+                            line_df = path_to_line_df(points_df)
+                            points_df = points_df.copy()
+                            points_df["color"] = [[220, 0, 0, 220]] * len(points_df)
+                            points_df["radius"] = 120
+                            points_df_de = filter_points_to_germany(points_df)
+                            if len(points_df_de) < len(points_df):
+                                st.caption("Some points were outside Germany and were ignored for framing.")
+                            points_df = points_df_de if len(points_df_de) >= 2 else points_df
+                            line_df = path_to_line_df(points_df)
+                            line_df["color"] = [[30, 120, 200, 220]]
+                            view_state = compute_view_state(points_df)
+                            layers = [
+                                pdk.Layer("PathLayer", data=line_df, get_path="path", get_width=6, width_min_pixels=6, rounded=True, opacity=0.85, get_color="color"),
+                                pdk.Layer("ScatterplotLayer", data=points_df, get_position=["lon", "lat"], get_radius="radius", get_fill_color="color", pickable=True),
+                            ]
+                            tooltip = {"text": "{idx}. {name}"}
+                            st.pydeck_chart(
+                                pdk.Deck(
+                                    layers=layers,
+                                    initial_view_state=view_state,
+                                    tooltip=tooltip,
+                                    map_style="https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
+                                ),
+                                use_container_width=True,
                             )
-                        st.dataframe(hub_rows, use_container_width=True)
+                        else:
+                            st.warning("Not enough coordinates to draw the route on the map.")
 
-    st.subheader("Local SPARQL Query")
-    preset_stop_id = st.text_input("Stop ID for neighbors preset", value="100001")
-    neighbor_query = NEIGHBORS_TEMPLATE.replace("%STOP_ID%", preset_stop_id.strip())
-    preset_options = {
-        "Stops basic": default_query,
-        "Edges (top connections)": EDGES_SPARQL,
-        "Neighbors for stop_id": neighbor_query,
-    }
-    preset_label = st.selectbox("Preset queries", options=list(preset_options.keys()), index=0)
-    sparql_query = st.text_area("SPARQL query", value=preset_options[preset_label], height=220)
+                        st.markdown("**Fastest Route Details**")
 
-    try:
-        results = kg.query(sparql_query)
-        rows = []
-        for r in results:
-            row_data = {str(k): v for k, v in r.asdict().items()}
-            rows.append(
-                {
-                    str(var): str(row_data.get(str(var))) if row_data.get(str(var)) is not None else ""
-                    for var in results.vars
-                }
-            )
+                        def is_major_station(station_key: str) -> bool:
+                            info = node_info.get(station_key)
+                            if not info or not info.display_name:
+                                return False
+                            name_lower = info.display_name.lower()
+                            return "central station" in name_lower or "hbf" in name_lower
 
-        max_rows = 200
-        display_rows = rows[:max_rows]
-        if len(rows) > max_rows:
-            st.info(f"Showing first {max_rows} of {len(rows)} rows.")
+                        # Get indices of major stations, always including start and end.
+                        major_indices = sorted(list(set(
+                            [0, len(fastest_path) - 1] +
+                            [i for i, stop in enumerate(fastest_path) if is_major_station(stop)]
+                        )))
 
-        st.dataframe(display_rows, use_container_width=True)
-    except Exception as exc:
-        st.error(f"Query failed: {exc}")
+                        # If there are no intermediate major stations, use a simple display.
+                        if len(major_indices) <= 2:
+                            st.write(_fmt_path(fastest_path))
+                        else:
+                            # Iterate through segments of the path defined by major stations.
+                            for i in range(len(major_indices) - 1):
+                                start_idx = major_indices[i]
+                                end_idx = major_indices[i+1]
+
+                                start_station_label = _label(fastest_path[start_idx])
+
+                                # Display the major station.
+                                st.markdown(f"• **{start_station_label}**")
+
+                                # Check for intermediate "small" stations
+                                intermediate_stops = fastest_path[start_idx + 1 : end_idx]
+
+                                if intermediate_stops:
+                                    num_stops = len(intermediate_stops)
+                                    stop_str = "stop" if num_stops == 1 else "stops"
+                                    # The expander contains the intermediate stops.
+                                    with st.expander(f"{num_stops} intermediate {stop_str}"):
+                                        for stop_key in intermediate_stops:
+                                            st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;• {_label(stop_key)}")
+                            
+                            # Display the final major station of the path.
+                            st.markdown(f"• **{_label(fastest_path[major_indices[-1]])}**")
+
+                        legs_df = build_legs_df(G, fastest_path, node_info)
+                        if not legs_df.empty:
+                            with st.expander("Show leg-by-leg details"):
+                                st.dataframe(legs_df, use_container_width=True)
+                        else:
+                            st.info("No leg details available.")
+
+                        if ENABLE_PAGERANK and robust_path:
+                            st.markdown("---")
+                            st.markdown("### Fastest vs. Robust Route")
+                            col_fast, col_rob = st.columns(2)
+                            with col_fast:
+                                st.markdown("**Fastest (with risk stats)**")
+                                st.metric("Total time", format_time_hm(fastest_time_sec))
+                                st.metric("Stops", len(fastest_path))
+                                st.metric("Risk sum", f"{fastest_risk:.3f}")
+                                st.metric("Top-10 hubs visited", fastest_hubs)
+                                st.write(_fmt_path(fastest_path))
+                            with col_rob:
+                                st.markdown("**Robust**")
+                                st.metric("Total time", format_time_hm(robust_time_sec))
+                                st.metric("Stops", len(robust_path))
+                                st.metric("Risk sum", f"{robust_risk:.3f}")
+                                st.metric("Top-10 hubs visited", robust_hubs)
+                                st.write(_fmt_path(robust_path))
+
+                        if ENABLE_PAGERANK and top10:
+                            st.markdown("---")
+                            st.markdown("### Top-10 Hubs (by PageRank)")
+                            hub_rows = []
+                            pr_scores = pr
+                            risk_scores = risk
+                            for sid, score in top10.items():
+                                info = node_info.get(sid)
+                                hub_rows.append(
+                                    {
+                                        "station_key": sid,
+                                        "station_name": info.display_name if info else "",
+                                        "pagerank_score": score,
+                                        "risk": risk_scores.get(sid, 0.0),
+                                    }
+                                )
+                            hub_df = pd.DataFrame(hub_rows)
+                            chart = alt.Chart(hub_df).mark_bar().encode(
+                                x='pagerank_score:Q',
+                                y=alt.Y('station_name:N', sort='-x', title="Station"),
+                                tooltip=["station_name", "pagerank_score", "risk"]
+                            ).properties(
+                                title='Top 10 Hubs by PageRank'
+                            ).interactive()
+                            st.altair_chart(chart, use_container_width=True)
+
+    with tab_sparql:
+        st.subheader("Explore the Knowledge Graph with SPARQL")
+        preset_stop_id = st.text_input("Stop ID for neighbors preset", value="100001", key="sparql_stop_id")
+        neighbor_query = NEIGHBORS_TEMPLATE.replace("%STOP_ID%", preset_stop_id.strip())
+        preset_options = {
+            "Stops basic": default_query,
+            "Edges (top connections)": EDGES_SPARQL,
+            "Neighbors for stop_id": neighbor_query,
+        }
+        preset_label = st.selectbox("Preset queries", options=list(preset_options.keys()), index=0, key="sparql_preset")
+        sparql_query = st.text_area("SPARQL query", value=preset_options[preset_label], height=220, key="sparql_query_text")
+
+        if st.button("Run Query"):
+            try:
+                with st.spinner("Querying..."):
+                    results = kg.query(sparql_query)
+                    rows = []
+                    for r in results:
+                        row_data = {str(k): v for k, v in r.asdict().items()}
+                        rows.append(
+                            {
+                                str(var): str(row_data.get(str(var))) if row_data.get(str(var)) is not None else ""
+                                for var in results.vars
+                            }
+                        )
+                max_rows = 200
+                display_rows = rows[:max_rows]
+                st.success(f"Found {len(rows)} results.")
+                if len(rows) > max_rows:
+                    st.info(f"Showing first {max_rows} rows.")
+
+                st.dataframe(display_rows, use_container_width=True)
+            except Exception as exc:
+                st.error(f"Query failed: {exc}")
 
 
 if __name__ == "__main__":
