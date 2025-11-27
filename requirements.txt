@@ -1,4 +1,6 @@
 streamlit
-rdflib
-pandas
-
+streamlit-folium
+folium
+networkx
+requests
+scipy

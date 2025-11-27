@@ -1,147 +1,177 @@
-from pathlib import Path
-import hashlib
-
 import streamlit as st
-from rdflib import Graph, Literal, Namespace, URIRef
-from rdflib.namespace import RDF
+from streamlit_folium import st_folium
+import folium
+from data.api_client import TransportAPI
+from core.traffic_system import TrafficSystem
 
-from src.gtfs_loader import load_stops_from_gtfs_zip
-from src.kg_builder import build_kg_from_stops
-
-st.set_page_config(page_title="Transit Knowledge Graph Demo", layout="wide")
-
-DATA_DIR = Path(__file__).parent / "data"
-KG_CACHE_PATH = DATA_DIR / "kg_demo.ttl"
-
-ONT = Namespace("http://example.org/ont/")
-
-DEFAULT_SPARQL = """
-PREFIX ont: <http://example.org/ont/>
-SELECT ?s ?name ?next
-WHERE {
-  ?s a ont:Stop .
-  OPTIONAL { ?s ont:stopName ?name . }
-  OPTIONAL { ?s ont:nextStop ?next . }
-}
-"""
+st.set_page_config(layout="wide", page_title="DB Impact Monitor")
 
 
-GTFS_SPARQL = """
-PREFIX ont: <http://example.org/ont/>
-SELECT ?s ?id ?name ?lat ?lon
-WHERE {
-  ?s a ont:Stop .
-  OPTIONAL { ?s ont:stopId ?id . }
-  OPTIONAL { ?s ont:stopName ?name . }
-  OPTIONAL { ?s ont:lat ?lat . }
-  OPTIONAL { ?s ont:lon ?lon . }
-}
-LIMIT 200
-"""
+# === 1. 数据加载 ===
+@st.cache_resource
+def load_data():
+    api = TransportAPI()
+    system = TrafficSystem()
+    snapshot = {}
+
+    # 进度条
+    progress_bar = st.progress(0, text="正在同步全德路网实时数据...")
+
+    idx = 0
+    total = len(api.target_stations)
+    # 按名字排序，方便在列表里找
+    sorted_stations = sorted(api.target_stations.items())
+
+    for name, sid in sorted_stations:
+        lat, lon = api.get_coords(name)
+        avg_delay, details = api.get_realtime_departures(sid)
+        rank = system.get_rank(name)
+        impact = avg_delay * rank * 1000
+
+        snapshot[name] = {
+            "pos": (lat, lon),
+            "avg_delay": avg_delay,
+            "details": details,
+            "rank": rank,
+            "impact": impact
+        }
+        idx += 1
+        progress_bar.progress(idx / total)
+
+    progress_bar.empty()
+    return snapshot
 
 
-def load_or_create_kg(path: Path) -> tuple[Graph, bool]:
-    """Load a KG from TTL if present, else create the toy KG and persist it."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    graph = Graph()
-    if path.exists():
-        graph.parse(path, format="turtle")
-        return graph, True
+data = load_data()
 
-    graph.bind("ont", ONT)
-    stop_a = URIRef(ONT["Stop_A"])
-    stop_b = URIRef(ONT["Stop_B"])
+# === 2. 状态管理 ===
+if "selected_station" not in st.session_state:
+    st.session_state.selected_station = None
 
-    graph.add((stop_a, RDF.type, ONT.Stop))
-    graph.add((stop_b, RDF.type, ONT.Stop))
-    graph.add((stop_a, ONT.stopName, Literal("Hauptbahnhof")))
-    graph.add((stop_b, ONT.stopName, Literal("Universität")))
-    graph.add((stop_a, ONT.nextStop, stop_b))
+# === 3. 界面布局 ===
+st.title("🚆 UrbanPulse: 实时故障传导分析")
 
-    graph.serialize(destination=path, format="turtle")
-    return graph, False
+# 使用 1:3 的比例，左边放长列表，右边放地图
+col1, col2 = st.columns([1, 2.5])
 
+# --- 左侧：所有站点的详细列表 (回归经典功能) ---
+with col1:
+    st.subheader("📋 全网站点监控")
+    st.caption("点击展开查看各线路详情")
 
-def load_gtfs_kg(gtfs_zip_bytes: bytes) -> tuple[Graph, bool, Path]:
-    """Load GTFS-derived KG from cache if available, else build and persist it."""
-    digest = hashlib.sha256(gtfs_zip_bytes).hexdigest()
-    cache_path = DATA_DIR / f"kg_gtfs_{digest[:12]}.ttl"
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    # 遍历所有数据，生成折叠面板
+    for name, info in data.items():
+        # 1. 准备标题状态
+        delay = info['avg_delay']
+        impact = info['impact']
 
-    graph = Graph()
-    if cache_path.exists():
-        graph.parse(cache_path, format="turtle")
-        return graph, True, cache_path
+        # 图标逻辑：延误严重显示红灯，否则绿灯
+        status_icon = "🔴" if delay > 5 else "🟢"
 
-    stops_df = load_stops_from_gtfs_zip(gtfs_zip_bytes)
-    graph = build_kg_from_stops(stops_df, ONT)
-    graph.serialize(destination=cache_path, format="turtle")
-    return graph, False, cache_path
+        # 标题显示：站名 + 平均延误 + Impact
+        label = f"{status_icon} {name} (+{delay:.0f}min)"
 
+        # 2. 生成折叠面板 (Expander)
+        # 如果当前选中的是这个站，默认展开 (expanded=True)
+        is_expanded = (st.session_state.selected_station == name)
 
-def main() -> None:
-    st.title("Transit Knowledge Graph — Minimal Demo (RDFLib + SPARQL)")
+        with st.expander(label, expanded=is_expanded):
+            # 显示核心指标
+            c1, c2 = st.columns(2)
+            c1.metric("PageRank", f"{info['rank']:.4f}")
+            c2.metric("Impact", f"{info['impact']:.1f}")
 
-    st.sidebar.subheader("Static Data (GTFS)")
-    uploaded_gtfs = st.sidebar.file_uploader("Upload GTFS zip", type=["zip"])
-    use_demo_kg = st.sidebar.checkbox("Use demo KG", value=True)
+            st.markdown("---")
+            st.markdown("**🚦 实时发车详情:**")
 
-    kg: Graph | None = None
-    kg_label = "Demo KG"
-    default_query = DEFAULT_SPARQL
-    status_msg = ""
+            # 3. 列出该站的所有线路 (这里就是你要的文字信息！)
+            visible_lines = 0
+            for train in info['details']:
+                d_time = train['delay']
+                # 单条线路的红绿灯
+                line_icon = "🔴" if d_time > 5 else "🟢"
+                # 是否能画图
+                map_icon = "🗺️" if train['dest_coords'] else ""
+                if train['dest_coords']: visible_lines += 1
 
-    prefer_gtfs = uploaded_gtfs is not None and not use_demo_kg
-    if prefer_gtfs and uploaded_gtfs is not None:
-        try:
-            gtfs_bytes = uploaded_gtfs.getvalue()
-            kg, loaded_from_cache, cache_path = load_gtfs_kg(gtfs_bytes)
-            kg_label = "GTFS KG"
-            default_query = GTFS_SPARQL
-            status_msg = (
-                f"Loaded GTFS KG from cache: {cache_path}"
-                if loaded_from_cache
-                else f"Built GTFS KG and cached to: {cache_path}"
-            )
-        except Exception as exc:
-            st.error(f"Failed to load GTFS KG: {exc}")
-            st.info("Falling back to demo KG.")
+                # 打印每一行文字：线路 -> 终点 (延误)
+                st.write(f"{line_icon} **{train['line']}** → {train['to']} (+{d_time:.0f}) {map_icon}")
 
-    if kg is None:
-        kg, loaded_from_cache = load_or_create_kg(KG_CACHE_PATH)
-        status_msg = (
-            f"Loaded demo KG from cache: {KG_CACHE_PATH}"
-            if loaded_from_cache
-            else f"Created demo KG and saved to cache: {KG_CACHE_PATH}"
-        )
+            if visible_lines == 0:
+                st.caption("⚠️ 无坐标数据，无法画线")
 
-    st.success(status_msg)
-    st.write(f"Using: **{kg_label}** | Triples: **{len(kg)}**")
+            # 4. 增加一个按钮，点击可以聚焦到地图
+            # key 必须唯一，所以加上 name
+            if st.button(f"📍 在地图上定位 {name}", key=f"btn_{name}"):
+                st.session_state.selected_station = name
+                st.rerun()
 
-    st.subheader("Local SPARQL Query")
-    sparql_query = st.text_area("SPARQL query", value=default_query, height=200)
+# --- 右侧：地图 ---
+with col2:
+    # 默认中心
+    map_center = [50.5, 10.0]
+    zoom = 6
 
-    try:
-        results = kg.query(sparql_query)
-        rows = []
-        for r in results:
-            row_data = {str(k): v for k, v in r.asdict().items()}
-            rows.append(
-                {
-                    str(var): str(row_data.get(str(var))) if row_data.get(str(var)) is not None else ""
-                    for var in results.vars
-                }
-            )
+    # 如果选中了站点，地图中心自动飞过去
+    if st.session_state.selected_station:
+        sel_node = st.session_state.selected_station
+        if sel_node in data and data[sel_node]['pos']:
+            map_center = data[sel_node]['pos']
+            zoom = 8  # 稍微放大一点
 
-        max_rows = 200
-        display_rows = rows[:max_rows]
-        if len(rows) > max_rows:
-            st.info(f"Showing first {max_rows} of {len(rows)} rows.")
+    m = folium.Map(location=map_center, zoom_start=zoom, tiles="CartoDB dark_matter")
 
-        st.dataframe(display_rows, use_container_width=True)
-    except Exception as exc:
-        st.error(f"Query failed: {exc}")
+    # A. 画城市点
+    for name, info in data.items():
+        if not info['pos']: continue
+        color = "#ff4b4b" if info['avg_delay'] > 5 else "#00c0f2"
 
+        # 稍微突出显示选中的点
+        radius = 10 if name == st.session_state.selected_station else 6
+        opacity = 1.0 if name == st.session_state.selected_station else 0.8
 
-if __name__ == "__main__":
-    main()
+        folium.CircleMarker(
+            location=info['pos'],
+            radius=radius,
+            color=color,
+            fill=True,
+            fill_color=color,
+            fill_opacity=opacity,
+            tooltip=f"{name} (点击查看)",
+            popup=None
+        ).add_to(m)
+
+    # B. 画连线 (仅针对选中)
+    if st.session_state.selected_station:
+        node = st.session_state.selected_station
+        info = data.get(node)
+
+        if info and info['pos']:
+            start = info['pos']
+            for train in info['details']:
+                end = train['dest_coords']
+                if end:
+                    is_delayed = train['delay'] > 5
+                    line_color = "#ff4b4b" if is_delayed else "#00c0f2"
+                    weight = 4 if is_delayed else 2
+                    opacity = 0.9 if is_delayed else 0.5
+
+                    folium.PolyLine(
+                        locations=[start, end],
+                        color=line_color,
+                        weight=weight,
+                        opacity=opacity,
+                        tooltip=f"{train['line']} -> {train['to']}"
+                    ).add_to(m)
+
+    # C. 渲染
+    output = st_folium(m, width=800, height=700, key="main_map")
+
+    # D. 点击逻辑
+    if output['last_object_clicked']:
+        clicked = output['last_object_clicked']
+        if 'tooltip' in clicked:
+            name = clicked['tooltip'].split(" (")[0]
+            if name in data and st.session_state.selected_station != name:
+                st.session_state.selected_station = name
+                st.rerun()
