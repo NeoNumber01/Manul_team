@@ -2,18 +2,16 @@ import requests
 import time
 import json
 import os
+import polyline  # <--- 新增这个库
 
 
 class TransportAPI:
     def __init__(self):
         self.base_url = "https://v6.db.transport.rest"
-
-        # === 1. 加载你上传的超级坐标库 ===
         self.station_lookup = {}
         self.load_station_database()
 
-        # === 2. 定义我们要监控的核心站点 ===
-        # 你可以在这里随意增加，现在都能查到坐标了！
+        # 监控列表
         self.target_stations = {
             "Heilbronn Hbf": "8000156",
             "Stuttgart Hbf": "8000096",
@@ -23,64 +21,59 @@ class TransportAPI:
             "Hamburg Hbf": "8002549",
             "Mannheim Hbf": "8000244",
             "Nürnberg Hbf": "8000284",
-            "Köln Hbf": "8000207",
-            "Leipzig Hbf": "8010205",
-            "Dresden Hbf": "8010085",
-            "Hannover Hbf": "8000152"
+            "Köln Hbf": "8000207"
         }
 
     def load_station_database(self):
-        """
-        读取本地的 stations_db.json 文件
-        """
         try:
-            # 获取当前脚本所在的文件夹路径 (data/)
             current_dir = os.path.dirname(os.path.abspath(__file__))
-            # 拼接文件名
             file_path = os.path.join(current_dir, 'stations_db.json')
-
-            print(f"📂 正在加载坐标库: {file_path}")
             with open(file_path, 'r', encoding='utf-8') as f:
                 self.station_lookup = json.load(f)
-
-            print(f"✅ 成功加载了 {len(self.station_lookup)} 个站点的坐标！")
-
-        except Exception as e:
-            print(f"❌ 加载坐标库失败: {e}")
-            # 如果加载失败，保留一个最小集合防止程序崩溃
-            self.station_lookup = {
-                "Heilbronn Hbf": (49.1427, 9.2109),
-                "Berlin Hbf": (52.5256, 13.3696)
-            }
+        except:
+            self.station_lookup = {"Heilbronn Hbf": (49.1427, 9.2109)}
 
     def get_coords(self, name):
-        """
-        查找坐标：现在支持全德国数千个站点！
-        """
         if not name: return None
-
-        # 1. 直接匹配 (最快)
-        if name in self.station_lookup:
-            return self.station_lookup[name]
-
-        # 2. 模糊匹配 (例如 "Frankfurt(Main)Hbf" 匹配 "Frankfurt Hbf")
-        # 为了性能，我们先尝试常见变体
+        if name in self.station_lookup: return self.station_lookup[name]
         clean_name = name.replace(" Hbf", "").replace(" Hauptbahnhof", "")
-
         for k, v in self.station_lookup.items():
-            if clean_name in k:
-                return v
+            if clean_name in k: return v
         return None
 
-    def get_realtime_departures(self, station_id):
-        """请求 API 获取实时数据"""
+    # === 新增：获取真实的弯曲路径 ===
+    def fetch_trip_shape(self, trip_id):
+        """
+        根据 Trip ID 向 API 请求真实的铁轨形状
+        """
         try:
-            # 稍微休息，对公共API温柔一点
-            time.sleep(0.1)
-            url = f"{self.base_url}/stops/{station_id}/departures"
+            # 这里必须加一点延迟，否则并发请求真实形状极其容易触发限流
+            time.sleep(0.2)
 
-            # duration=180: 查看未来3小时的车，保证能画出更多长线
-            params = {"duration": 180, "results": 30, "when": "now"}
+            # polyline=true 是关键！
+            url = f"{self.base_url}/trips/{trip_id}?polyline=true"
+            res = requests.get(url, timeout=3)
+
+            if res.status_code == 200:
+                data = res.json()
+                trip = data.get('trip', {})
+                # API 返回的是 Google Polyline 编码字符串，需要解码
+                encoded_line = trip.get('polyline')
+                if encoded_line:
+                    # 解码为 [(lat, lon), (lat, lon), ...]
+                    return polyline.decode(encoded_line)
+            return None
+        except:
+            return None
+
+    def get_realtime_departures(self, station_id):
+        """
+        获取车次，并顺便获取前几趟车的真实形状
+        """
+        try:
+            time.sleep(0.2)
+            url = f"{self.base_url}/stops/{station_id}/departures"
+            params = {"duration": 120, "results": 15, "when": "now"}
 
             res = requests.get(url, params=params, timeout=5)
             if res.status_code != 200: return 0, []
@@ -91,31 +84,36 @@ class TransportAPI:
             details = []
             delays = []
 
-            for dep in departures:
-                # 1. 获取延误
-                delay = dep.get('delay', 0)
-                if delay is None: delay = 0
+            # 限制只获取前 3 趟车的真实形状，防止启动太慢！
+            shape_limit = 3
+
+            for i, dep in enumerate(departures):
+                delay = dep.get('delay', 0) or 0
                 delay_min = abs(delay) / 60
                 delays.append(delay_min)
 
-                # 2. 获取终点
                 direction = dep.get('direction', 'Unknown')
-
-                # 3. 查坐标 (现在几乎一定能查到了！)
                 dest_coords = self.get_coords(direction)
 
-                # 4. 只有当找到了坐标，我们才把它加入列表
-                # 这样侧边栏显示的都是能画出线的车
+                # 获取 Trip ID 用于查询形状
+                trip_id = dep.get('tripId')
+                real_shape = None
+
+                # 只有前几趟车，且有终点坐标的，我们才去查形状
+                if i < shape_limit and trip_id and dest_coords:
+                    # print(f"   Trying to fetch shape for {dep.get('line', {}).get('name')}...")
+                    real_shape = self.fetch_trip_shape(trip_id)
+
                 details.append({
                     "line": dep.get('line', {}).get('name', '?'),
                     "to": direction,
                     "delay": delay_min,
-                    "dest_coords": dest_coords
+                    "dest_coords": dest_coords,
+                    "real_shape": real_shape  # 这里存着真实的弯曲路径！
                 })
 
             avg = sum(delays) / len(delays) if delays else 0
             return avg, details
-
         except Exception as e:
             print(f"API Error: {e}")
             return 0, []
