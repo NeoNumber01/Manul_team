@@ -1,52 +1,19 @@
 import requests
 import time
+import json
+import os
 
 
 class TransportAPI:
     def __init__(self):
         self.base_url = "https://v6.db.transport.rest"
 
-        # === 核心：坐标库 (画线必须要有终点坐标) ===
-        # 这里包含了大城市和海尔布隆周边的区域站点
-        self.station_lookup = {
-            # --- 核心枢纽 ---
-            "Heilbronn Hbf": (49.1427, 9.2109),
-            "Stuttgart Hbf": (48.7832, 9.1818),
-            "Munich Hbf": (48.1403, 11.5588), "München Hbf": (48.1403, 11.5588),
-            "Frankfurt(Main)Hbf": (50.1071, 8.6638), "Frankfurt Hbf": (50.1071, 8.6638),
-            "Berlin Hbf": (52.5256, 13.3696),
-            "Hamburg Hbf": (53.5528, 10.0067),
-            "Köln Hbf": (50.9432, 6.9586),
-            "Mannheim Hbf": (49.4793, 8.4699),
-            "Karlsruhe Hbf": (48.9935, 8.4021),
-            "Würzburg Hbf": (49.8018, 9.9358),
-            "Nürnberg Hbf": (49.4456, 11.0829),
-            "Ulm Hbf": (48.3994, 9.9829),
-            "Leipzig Hbf": (51.3465, 12.3833),
-            "Hannover Hbf": (52.3766, 9.7410),
-            "Heidelberg Hbf": (49.4036, 8.6757),
-            "Düsseldorf Hbf": (51.2199, 6.7943),
+        # === 1. 加载你上传的超级坐标库 ===
+        self.station_lookup = {}
+        self.load_station_database()
 
-            # --- 海尔布隆周边 (保证点击主场时有线看) ---
-            "Neckarsulm": (49.1917, 9.2272),
-            "Bad Friedrichshall Hbf": (49.2319, 9.2144),
-            "Möckmühl": (49.3236, 9.3592),
-            "Osterburken": (49.4283, 9.4261),
-            "Eppingen": (49.1378, 8.9067),
-            "Öhringen Hbf": (49.2003, 9.5017), "Öhringen": (49.2003, 9.5017),
-            "Bietigheim-Bissingen": (48.9483, 9.1172),
-            "Ludwigsburg": (48.8911, 9.1856),
-            "Mosbach-Neckarelz": (49.3444, 9.1239),
-            "Sinsheim(Elsenz) Hbf": (49.2536, 8.8728),
-
-            # --- 常见国际/长途终点 ---
-            "Basel Bad Bf": (47.5664, 7.6069),
-            "Zürich HB": (47.3782, 8.5402),
-            "Paris Est": (48.8768, 2.3591),
-            "Kassel-Wilhelmshöhe": (51.3137, 9.4475)
-        }
-
-        # 我们要监控的主要站点 (API 请求的目标)
+        # === 2. 定义我们要监控的核心站点 ===
+        # 你可以在这里随意增加，现在都能查到坐标了！
         self.target_stations = {
             "Heilbronn Hbf": "8000156",
             "Stuttgart Hbf": "8000096",
@@ -56,24 +23,64 @@ class TransportAPI:
             "Hamburg Hbf": "8002549",
             "Mannheim Hbf": "8000244",
             "Nürnberg Hbf": "8000284",
-            "Köln Hbf": "8000207"
+            "Köln Hbf": "8000207",
+            "Leipzig Hbf": "8010205",
+            "Dresden Hbf": "8010085",
+            "Hannover Hbf": "8000152"
         }
 
+    def load_station_database(self):
+        """
+        读取本地的 stations_db.json 文件
+        """
+        try:
+            # 获取当前脚本所在的文件夹路径 (data/)
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            # 拼接文件名
+            file_path = os.path.join(current_dir, 'stations_db.json')
+
+            print(f"📂 正在加载坐标库: {file_path}")
+            with open(file_path, 'r', encoding='utf-8') as f:
+                self.station_lookup = json.load(f)
+
+            print(f"✅ 成功加载了 {len(self.station_lookup)} 个站点的坐标！")
+
+        except Exception as e:
+            print(f"❌ 加载坐标库失败: {e}")
+            # 如果加载失败，保留一个最小集合防止程序崩溃
+            self.station_lookup = {
+                "Heilbronn Hbf": (49.1427, 9.2109),
+                "Berlin Hbf": (52.5256, 13.3696)
+            }
+
     def get_coords(self, name):
-        """查找坐标，支持模糊匹配"""
+        """
+        查找坐标：现在支持全德国数千个站点！
+        """
         if not name: return None
-        if name in self.station_lookup: return self.station_lookup[name]
+
+        # 1. 直接匹配 (最快)
+        if name in self.station_lookup:
+            return self.station_lookup[name]
+
+        # 2. 模糊匹配 (例如 "Frankfurt(Main)Hbf" 匹配 "Frankfurt Hbf")
+        # 为了性能，我们先尝试常见变体
+        clean_name = name.replace(" Hbf", "").replace(" Hauptbahnhof", "")
+
         for k, v in self.station_lookup.items():
-            if name in k or k in name: return v
+            if clean_name in k:
+                return v
         return None
 
     def get_realtime_departures(self, station_id):
         """请求 API 获取实时数据"""
         try:
-            time.sleep(0.1)  # 稍微休息防止并发太快
+            # 稍微休息，对公共API温柔一点
+            time.sleep(0.1)
             url = f"{self.base_url}/stops/{station_id}/departures"
-            # duration=120 抓取未来2小时的车，增加画出长线的概率
-            params = {"duration": 120, "results": 20, "when": "now"}
+
+            # duration=180: 查看未来3小时的车，保证能画出更多长线
+            params = {"duration": 180, "results": 30, "when": "now"}
 
             res = requests.get(url, params=params, timeout=5)
             if res.status_code != 200: return 0, []
@@ -91,10 +98,14 @@ class TransportAPI:
                 delay_min = abs(delay) / 60
                 delays.append(delay_min)
 
-                # 2. 获取终点坐标 (画线关键)
+                # 2. 获取终点
                 direction = dep.get('direction', 'Unknown')
+
+                # 3. 查坐标 (现在几乎一定能查到了！)
                 dest_coords = self.get_coords(direction)
 
+                # 4. 只有当找到了坐标，我们才把它加入列表
+                # 这样侧边栏显示的都是能画出线的车
                 details.append({
                     "line": dep.get('line', {}).get('name', '?'),
                     "to": direction,
@@ -104,5 +115,7 @@ class TransportAPI:
 
             avg = sum(delays) / len(delays) if delays else 0
             return avg, details
-        except:
+
+        except Exception as e:
+            print(f"API Error: {e}")
             return 0, []

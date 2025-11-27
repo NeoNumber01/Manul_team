@@ -7,42 +7,70 @@ from core.traffic_system import TrafficSystem
 st.set_page_config(layout="wide", page_title="DB Impact Monitor")
 
 
-# === 1. 数据加载 ===
+# === 1. 数据加载 (智能收集所有点) ===
 @st.cache_resource
 def load_data():
     api = TransportAPI()
     system = TrafficSystem()
-    snapshot = {}
 
-    # 进度条
-    progress_bar = st.progress(0, text="正在同步全德路网实时数据...")
+    # 1. 主动节点 (Active): 我们专门查询的大站
+    active_data = {}
+    # 2. 被动节点 (Passive): 线路终点提到的小站
+    passive_nodes = {}
 
-    idx = 0
-    total = len(api.target_stations)
-    # 按名字排序，方便在列表里找
+    progress_bar = st.progress(0, text="正在构建全网拓扑...")
+
+    # --- 第一阶段：获取核心数据 ---
     sorted_stations = sorted(api.target_stations.items())
+    total = len(sorted_stations)
 
-    for name, sid in sorted_stations:
-        lat, lon = api.get_coords(name)
+    for idx, (name, sid) in enumerate(sorted_stations):
+        coords = api.get_coords(name)
+        if not coords: continue
+
+        # 获取实时数据
         avg_delay, details = api.get_realtime_departures(sid)
         rank = system.get_rank(name)
         impact = avg_delay * rank * 1000
 
-        snapshot[name] = {
-            "pos": (lat, lon),
+        active_data[name] = {
+            "pos": coords,
             "avg_delay": avg_delay,
             "details": details,
             "rank": rank,
-            "impact": impact
+            "impact": impact,
+            "type": "main"  # 标记为主节点
         }
-        idx += 1
-        progress_bar.progress(idx / total)
+
+        # --- 第二阶段：收集所有终点 (填补虚空) ---
+        for train in details:
+            dest_name = train['to']
+            dest_coords = train['dest_coords']
+
+            # 如果这个终点有坐标，且不是主节点，就把它加入被动节点库
+            if dest_coords and dest_name not in active_data and dest_name not in passive_nodes:
+                # 被动节点没有延误数据，但我们需要把它画出来
+                passive_rank = system.get_rank(dest_name)  # 通常很低
+                passive_nodes[dest_name] = {
+                    "pos": dest_coords,
+                    "rank": passive_rank,
+                    "type": "passive"  # 标记为被动节点
+                }
+
+        progress_bar.progress((idx + 1) / total)
 
     progress_bar.empty()
-    return snapshot
+    return active_data, passive_nodes
 
 
-data = load_data()
+# 加载数据
+try:
+    active_data, passive_nodes = load_data()
+    # 合并用于地图绘制
+    all_map_data = {**active_data, **passive_nodes}
+except Exception as e:
+    st.error(f"数据加载异常: {e}")
+    active_data, passive_nodes, all_map_data = {}, {}, {}
 
 # === 2. 状态管理 ===
 if "selected_station" not in st.session_state:
@@ -51,84 +79,64 @@ if "selected_station" not in st.session_state:
 # === 3. 界面布局 ===
 st.title("🚆 UrbanPulse: 实时故障传导分析")
 
-# 使用 1:3 的比例，左边放长列表，右边放地图
-col1, col2 = st.columns([1, 2.5])
+col1, col2 = st.columns([1, 3])
 
-# --- 左侧：所有站点的详细列表 (回归经典功能) ---
+# --- 左侧：只显示有数据的主节点 ---
 with col1:
-    st.subheader("📋 全网站点监控")
-    st.caption("点击展开查看各线路详情")
+    st.subheader("📋 核心枢纽监控")
 
-    # 遍历所有数据，生成折叠面板
-    for name, info in data.items():
-        # 1. 准备标题状态
+    for name, info in active_data.items():
         delay = info['avg_delay']
-        impact = info['impact']
-
-        # 图标逻辑：延误严重显示红灯，否则绿灯
         status_icon = "🔴" if delay > 5 else "🟢"
-
-        # 标题显示：站名 + 平均延误 + Impact
         label = f"{status_icon} {name} (+{delay:.0f}min)"
 
-        # 2. 生成折叠面板 (Expander)
-        # 如果当前选中的是这个站，默认展开 (expanded=True)
         is_expanded = (st.session_state.selected_station == name)
 
         with st.expander(label, expanded=is_expanded):
-            # 显示核心指标
             c1, c2 = st.columns(2)
-            c1.metric("PageRank", f"{info['rank']:.4f}")
+            c1.metric("Rank", f"{info['rank']:.4f}")
             c2.metric("Impact", f"{info['impact']:.1f}")
 
-            st.markdown("---")
-            st.markdown("**🚦 实时发车详情:**")
-
-            # 3. 列出该站的所有线路 (这里就是你要的文字信息！)
-            visible_lines = 0
-            for train in info['details']:
-                d_time = train['delay']
-                # 单条线路的红绿灯
-                line_icon = "🔴" if d_time > 5 else "🟢"
-                # 是否能画图
-                map_icon = "🗺️" if train['dest_coords'] else ""
-                if train['dest_coords']: visible_lines += 1
-
-                # 打印每一行文字：线路 -> 终点 (延误)
-                st.write(f"{line_icon} **{train['line']}** → {train['to']} (+{d_time:.0f}) {map_icon}")
-
-            if visible_lines == 0:
-                st.caption("⚠️ 无坐标数据，无法画线")
-
-            # 4. 增加一个按钮，点击可以聚焦到地图
-            # key 必须唯一，所以加上 name
-            if st.button(f"📍 在地图上定位 {name}", key=f"btn_{name}"):
+            # 按钮
+            if st.button(f"📍 定位", key=f"btn_{name}"):
                 st.session_state.selected_station = name
                 st.rerun()
 
+            st.caption("实时发车:")
+            for train in info['details']:
+                d_time = train['delay']
+                line_icon = "🔴" if d_time > 5 else "🟢"
+                st.write(f"{line_icon} **{train['line']}** → {train['to']}")
+
 # --- 右侧：地图 ---
 with col2:
-    # 默认中心
-    map_center = [50.5, 10.0]
+    # 智能定中心
+    map_center = [50.0, 10.0]
     zoom = 6
-
-    # 如果选中了站点，地图中心自动飞过去
     if st.session_state.selected_station:
-        sel_node = st.session_state.selected_station
-        if sel_node in data and data[sel_node]['pos']:
-            map_center = data[sel_node]['pos']
-            zoom = 8  # 稍微放大一点
+        sel_info = all_map_data.get(st.session_state.selected_station)
+        if sel_info:
+            map_center = sel_info['pos']
+            zoom = 9  # 选中时自动放大，这样能看清小站！
 
     m = folium.Map(location=map_center, zoom_start=zoom, tiles="CartoDB dark_matter")
 
-    # A. 画城市点
-    for name, info in data.items():
-        if not info['pos']: continue
-        color = "#ff4b4b" if info['avg_delay'] > 5 else "#00c0f2"
-
-        # 稍微突出显示选中的点
-        radius = 10 if name == st.session_state.selected_station else 6
-        opacity = 1.0 if name == st.session_state.selected_station else 0.8
+    # A. 绘制所有节点 (解决虚空问题)
+    for name, info in all_map_data.items():
+        # 样式逻辑：区分大站和小站
+        if info['type'] == 'main':
+            # 大站：大圈，根据延误变色
+            radius = 8 + (info['rank'] * 100)  # Rank越高圈越大
+            color = "#ff4b4b" if info['avg_delay'] > 5 else "#00c0f2"
+            fill_opacity = 1.0
+            z_index_offset = 1000  # 保证大站在最上层
+        else:
+            # 小站 (被动)：极小的灰/白圈
+            # 这样缩小看时几乎不可见，放大看时就是连接点
+            radius = 3
+            color = "#888888"
+            fill_opacity = 0.5
+            z_index_offset = 0
 
         folium.CircleMarker(
             location=info['pos'],
@@ -136,25 +144,28 @@ with col2:
             color=color,
             fill=True,
             fill_color=color,
-            fill_opacity=opacity,
-            tooltip=f"{name} (点击查看)",
-            popup=None
+            fill_opacity=fill_opacity,
+            weight=1,
+            tooltip=f"{name}",  # 鼠标放上去显示名字
+            popup=None,
+            z_index_offset=z_index_offset
         ).add_to(m)
 
-    # B. 画连线 (仅针对选中)
+    # B. 绘制连线
     if st.session_state.selected_station:
         node = st.session_state.selected_station
-        info = data.get(node)
-
-        if info and info['pos']:
+        # 只从主节点库里找连线数据
+        if node in active_data:
+            info = active_data[node]
             start = info['pos']
+
             for train in info['details']:
                 end = train['dest_coords']
                 if end:
                     is_delayed = train['delay'] > 5
                     line_color = "#ff4b4b" if is_delayed else "#00c0f2"
-                    weight = 4 if is_delayed else 2
-                    opacity = 0.9 if is_delayed else 0.5
+                    weight = 3 if is_delayed else 1.5
+                    opacity = 0.9 if is_delayed else 0.6
 
                     folium.PolyLine(
                         locations=[start, end],
@@ -164,14 +175,17 @@ with col2:
                         tooltip=f"{train['line']} -> {train['to']}"
                     ).add_to(m)
 
-    # C. 渲染
-    output = st_folium(m, width=800, height=700, key="main_map")
+    output = st_folium(m, width=900, height=700, key="main_map")
 
-    # D. 点击逻辑
+    # 点击逻辑：允许点击小站，但如果点击小站，可能只是居中，不展开侧边栏
     if output['last_object_clicked']:
         clicked = output['last_object_clicked']
         if 'tooltip' in clicked:
-            name = clicked['tooltip'].split(" (")[0]
-            if name in data and st.session_state.selected_station != name:
+            name = clicked['tooltip']
+            # 只有点击主节点才触发侧边栏联动
+            if name in active_data and st.session_state.selected_station != name:
                 st.session_state.selected_station = name
                 st.rerun()
+            # 如果点击了小站，仅打印提示（可选）
+            elif name in passive_nodes:
+                st.toast(f"📍 小站点: {name} (无实时发车数据)", icon="ℹ️")
