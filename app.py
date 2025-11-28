@@ -1,199 +1,221 @@
 import streamlit as st
-from streamlit_folium import st_folium
+import pandas as pd
 import folium
+from streamlit_folium import st_folium
+
+# === PROJECT IMPORTS ===
 from data.api_client import TransportAPI
-from core.traffic_system import TrafficSystem
-
-st.set_page_config(layout="wide", page_title="DB Impact Monitor")
-
-
-# === 1. 数据加载 (含真实路径下载) ===
-@st.cache_resource
-def load_data():
-    api = TransportAPI()
-    system = TrafficSystem()
-    snapshot = {}
-
-    # 进度条 (下载形状会慢一点点，给用户反馈)
-    progress_bar = st.progress(0, text="正在同步全德路网及真实轨迹...")
-
-    total = len(api.target_stations)
-    # 按名字排序，让列表更好看
-    sorted_stations = sorted(api.target_stations.items())
-
-    for idx, (name, sid) in enumerate(sorted_stations):
-        coords = api.get_coords(name)
-        if not coords: continue
-
-        avg_delay, details = api.get_realtime_departures(sid)
-        rank = system.get_rank(name)
-        impact = avg_delay * rank * 1000
-
-        snapshot[name] = {
-            "pos": coords,
-            "avg_delay": avg_delay,
-            "details": details,
-            "rank": rank,
-            "impact": impact
-        }
-        progress_bar.progress((idx + 1) / total)
-
-    progress_bar.empty()
-    return snapshot
+from src.gtfs_loader import load_stops_from_gtfs_zip, load_stop_times_from_gtfs_zip
+from src.graph_builder import build_graph
+from src.graph_cache import load_graph_cache, save_graph_cache
+from src.ranking import compute_pagerank_and_risk
+from src.routing import shortest_path_fastest, path_total_time
 
 
-# 加载数据
-try:
-    data = load_data()
-except Exception as e:
-    st.error(f"数据加载异常: {e}")
-    data = {}
+# ================================================================
+# STREAMLIT CONFIG
+# ================================================================
+st.set_page_config(layout="wide", page_title="Hybrid Transit Intelligence 2.0")
+st.title("🟩 Hybrid Transit Intelligence — Real-Time DB + GTFS Graph + Routing")
 
-# === 2. 状态管理 ===
-if "selected_station" not in st.session_state:
-    st.session_state.selected_station = None
+st.markdown("""
+### Features:
+- 📡 Transport REST API (Germany)  
+- 🚌 Full GTFS graph (all stations)  
+- 🧠 PageRank-based station importance  
+- 🚦 Impact = delay × PageRank  
+- 🗺 Routing (GTFS From → To)  
+""")
 
-# === 3. 界面布局 ===
-st.title("🚆 UrbanPulse: 实时故障传导分析")
 
-col1, col2 = st.columns([1, 2.5])
+# ================================================================
+# 1. LOAD GTFS
+# ================================================================
+st.header("1. Load GTFS Data")
 
-# --- 左侧：全网站点列表 (恢复你要的功能) ---
+gtfs_path = "data/gtfs.zip"
+
+stops_df = load_stops_from_gtfs_zip(gtfs_path)
+stop_times_df = load_stop_times_from_gtfs_zip(gtfs_path)
+
+# Remove platform entries
+stops_df = stops_df[stops_df["location_type"] != 1]
+
+station_names = sorted(stops_df["stop_name"].unique().tolist())
+
+st.success(f"GTFS loaded: {len(stops_df)} stations.")
+
+
+# ================================================================
+# 2. LOAD GRAPH
+# ================================================================
+st.header("2. Build Station Graph")
+
+G = load_graph_cache("data/graph_cache.pkl")
+
+if G is None:
+    st.warning("Graph cache not found — building graph…")
+    G = build_graph(stops_df, stop_times_df)
+    save_graph_cache(G, "data/graph_cache.pkl")
+    st.success("Graph built and cached.")
+else:
+    st.success("Graph loaded from cache.")
+
+
+# ================================================================
+# 3. ROUTING
+# ================================================================
+st.header("3. Route Search (GTFS Routing)")
+
+col1, col2 = st.columns(2)
+
 with col1:
-    st.subheader("📋 全网实时监控")
-    st.caption("点击列表可直接定位，或点击地图查看")
+    from_station = st.selectbox("From:", station_names)
 
-    if not data:
-        st.warning("暂无数据")
-
-    # 遍历所有站点，生成列表
-    for name, info in data.items():
-        delay = info['avg_delay']
-        # 状态灯
-        status_icon = "🔴" if delay > 5 else "🟢"
-
-        # 标题显示：站名 + 延误时长
-        label = f"{status_icon} {name} (+{delay:.0f}min)"
-
-        # 如果是当前选中的站点，默认展开
-        is_expanded = (st.session_state.selected_station == name)
-
-        with st.expander(label, expanded=is_expanded):
-            # 1. 核心指标
-            c1, c2 = st.columns(2)
-            c1.metric("PageRank", f"{info['rank']:.4f}")
-            c2.metric("Impact", f"{info['impact']:.1f}")
-
-            # 2. 定位按钮
-            if st.button(f"📍 定位 {name}", key=f"btn_{name}"):
-                st.session_state.selected_station = name
-                st.rerun()
-
-            st.markdown("---")
-            st.caption("🚦 实时发车详情 (含轨迹状态):")
-
-            # 3. 详细文字列表
-            visible_lines = 0
-            for train in info['details']:
-                d_time = train['delay']
-                line_icon = "🔴" if d_time > 5 else "🟢"
-
-                # 图标：〰️=真实弯道, 📏=直线, ❌=无法画图
-                shape_icon = "〰️" if train.get('real_shape') else ("📏" if train['dest_coords'] else "❌")
-
-                if train['dest_coords']: visible_lines += 1
-
-                st.write(f"{line_icon} {shape_icon} **{train['line']}** → {train['to']} (+{d_time:.0f})")
-
-            if visible_lines == 0:
-                st.caption("⚠️ 暂无地理数据")
-
-# --- 右侧：地图 (含真实铁路网底图) ---
 with col2:
-    map_center = [50.5, 10.0]
-    zoom = 6
+    to_station = st.selectbox("To:", station_names)
 
-    # 选中时自动聚焦
-    if st.session_state.selected_station:
-        sel_node = st.session_state.selected_station
-        if sel_node in data and data[sel_node]['pos']:
-            map_center = data[sel_node]['pos']
-            zoom = 9
+path = None
+from_ids = []
 
-    m = folium.Map(location=map_center, zoom_start=zoom, tiles="CartoDB dark_matter")
+if from_station and to_station:
 
-    # 1. 叠加 OpenRailwayMap (真实铁轨层)
-    folium.TileLayer(
-        tiles="https://{s}.tiles.openrailwaymap.org/standard/{z}/{x}/{y}.png",
-        attr='OpenRailwayMap',
-        name="Railways",
-        overlay=True,
-        opacity=0.5
+    from_ids = stops_df[stops_df["stop_name"] == from_station]["stop_id"].tolist()
+    to_ids = stops_df[stops_df["stop_name"] == to_station]["stop_id"].tolist()
+
+    if from_ids and to_ids:
+
+        from_id = from_ids[0]
+        to_id = to_ids[0]
+
+        path = shortest_path_fastest(G, from_id, to_id)
+
+        if path:
+            st.success(f"Route found! Path length: {len(path)} nodes.")
+            travel_time = path_total_time(G, path)
+            st.info(f"Graph travel weight: {travel_time}")
+        else:
+            st.error("Route not found.")
+
+
+# ================================================================
+# 4. REAL-TIME (DELAY DATA)
+# ================================================================
+st.header("4. Real-Time Delays (Transport REST API)")
+
+api = TransportAPI()
+station_id = None
+
+# Match GTFS name against known DB API stations
+for name, sid in api.target_stations.items():
+    if from_station.lower() in name.lower():
+        station_id = sid
+        break
+
+if station_id:
+    avg_delay, details = api.get_realtime_departures(station_id)
+    st.metric("Average delay", f"{avg_delay:.1f} min")
+else:
+    st.info("Selected station is not available in the Transport API list.")
+
+
+# ================================================================
+# 4B. ACTIVE REAL-TIME TRAINS
+# ================================================================
+st.header("4B. Active Real-Time Trains Along Route")
+
+active_trains = []
+
+if path:
+    # Convert stop_ids → names along route
+    route_station_names = set()
+    for sid in path:
+        row = stops_df.loc[stops_df["stop_id"] == sid]
+        if not row.empty:
+            route_station_names.add(row.iloc[0]["stop_name"])
+
+    # Query only API stations that appear on the route
+    for hub_name, hub_id in api.target_stations.items():
+
+        base_name = hub_name.replace(" Hbf", "")
+        if any(base_name in name for name in route_station_names):
+
+            avg_d, det = api.get_realtime_departures(hub_id)
+
+            for train in det:
+                active_trains.append({
+                    "station": hub_name,
+                    "line": train["line"],
+                    "direction": train["to"],
+                    "delay_min": train["delay"],
+                    "destination_coords": train["dest_coords"],
+                    "polyline": train.get("real_shape")
+                })
+
+    if active_trains:
+        st.dataframe(pd.DataFrame(active_trains))
+    else:
+        st.warning("No active trains detected along this route (from monitored stations).")
+else:
+    st.info("Select a route first.")
+
+
+# ================================================================
+# 5. PageRank + Impact
+# ================================================================
+st.header("5. Station PageRank Importance")
+
+delay_mapping = []
+
+if path:
+    base_delay = avg_delay if station_id else 0.0
+
+    for stop_id in path:
+        delay_mapping.append({
+            "stop_id": stop_id,
+            "delay_minutes": base_delay
+        })
+
+df_delay = pd.DataFrame(delay_mapping)
+
+if df_delay.empty:
+    st.warning("No delay data available for this route.")
+else:
+    pagerank_df = compute_pagerank_and_risk(G, df_delay)
+
+    pagerank_df["lat"] = pagerank_df.index.map(lambda s: G.nodes[s].get("lat"))
+    pagerank_df["lon"] = pagerank_df.index.map(lambda s: G.nodes[s].get("lon"))
+
+    st.dataframe(pagerank_df.head())
+
+
+# ================================================================
+# 6. MAP VISUALIZATION
+# ================================================================
+st.header("6. Interactive Map")
+
+center_lat = pagerank_df["lat"].mean()
+center_lon = pagerank_df["lon"].mean()
+
+m = folium.Map(location=[center_lat, center_lon], zoom_start=9)
+
+# PageRank visualization
+for stop_id, row in pagerank_df.iterrows():
+    if pd.isna(row.lat) or pd.isna(row.lon):
+        continue
+
+    folium.CircleMarker(
+        location=[row.lat, row.lon],
+        radius=5 + row["pagerank"] * 40,
+        color="red",
+        fill=True,
+        fill_opacity=0.7,
+        popup=f"{row.stop_name} — PR {row.pagerank:.5f}"
     ).add_to(m)
 
-    # 2. 画站点圆点
-    for name, info in data.items():
-        if not info['pos']: continue
-        color = "#ff4b4b" if info['avg_delay'] > 5 else "#00c0f2"
+# Draw route path
+if path:
+    coords = [[G.nodes[n]["lat"], G.nodes[n]["lon"]] for n in path]
+    folium.PolyLine(coords, color="blue", weight=4, opacity=0.8).add_to(m)
 
-        # 选中变大
-        radius = 10 if name == st.session_state.selected_station else 6
-        opacity = 1.0 if name == st.session_state.selected_station else 0.8
-
-        folium.CircleMarker(
-            location=info['pos'],
-            radius=radius,
-            color=color,
-            fill=True,
-            fill_color=color,
-            fill_opacity=opacity,
-            tooltip=f"{name}",
-            popup=None
-        ).add_to(m)
-
-    # 3. 画连线 (混合模式：真实弯道 + 直线)
-    if st.session_state.selected_station:
-        node = st.session_state.selected_station
-        info = data.get(node)
-
-        if info and info['pos']:
-            start = info['pos']
-
-            for train in info['details']:
-                end = train['dest_coords']
-                real_shape = train.get('real_shape')
-
-                is_delayed = train['delay'] > 5
-                line_color = "#ff4b4b" if is_delayed else "#00c0f2"
-
-                # 情况 A: 有真实轨迹 -> 画实线
-                if real_shape:
-                    folium.PolyLine(
-                        locations=real_shape,
-                        color=line_color,
-                        weight=4,
-                        opacity=0.9,
-                        tooltip=f"REAL: {train['line']} -> {train['to']}"
-                    ).add_to(m)
-
-                # 情况 B: 只有终点坐标 -> 画虚线
-                elif end:
-                    folium.PolyLine(
-                        locations=[start, end],
-                        color=line_color,  # 颜色淡一点
-                        weight=2,
-                        opacity=0.6,
-                        dash_array='5, 10',  # 虚线表示"逻辑连接"
-                        tooltip=f"LOGICAL: {train['line']} -> {train['to']}"
-                    ).add_to(m)
-
-    # 4. 渲染与点击
-    output = st_folium(m, width=900, height=700, key="main_map")
-
-    if output['last_object_clicked']:
-        clicked = output['last_object_clicked']
-        if 'tooltip' in clicked:
-            name = clicked['tooltip']
-            if name in data and st.session_state.selected_station != name:
-                st.session_state.selected_station = name
-                st.rerun()
+st_folium(m, width=900, height=600)
