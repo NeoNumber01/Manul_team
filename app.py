@@ -2,8 +2,9 @@ import streamlit as st
 from streamlit_folium import st_folium
 import folium
 import pandas as pd
+import time
 
-# 核心模块
+# Core Modules
 from data.api_client import TransportAPI
 from core.traffic_system import TrafficSystem
 from viz import create_3d_map
@@ -11,7 +12,9 @@ from viz import create_3d_map
 st.set_page_config(layout="wide", page_title="DB UrbanPulse")
 
 
-# === 0. 辅助: 颜色 ===
+# ==========================
+# 0. Helper: Colors
+# ==========================
 def get_traffic_color(delay_min):
     if delay_min < 1:
         return "#00cc66"
@@ -42,17 +45,38 @@ def get_traffic_color_rgb(delay_min):
         return [153, 0, 204]
 
 
-# === 1. 数据加载 (纯 API，极速版) ===
-@st.cache_data(ttl=120, show_spinner=False)  # 缓存 2 分钟
-def fetch_live_data():
+# ==========================
+# 1. Static Resource Loading
+# ==========================
+@st.cache_resource
+def load_static_resources():
+    """
+    Load heavy static assets (API client, Algorithm system).
+    REMOVED: osm_loader (No longer needed)
+    """
     api = TransportAPI()
     system = TrafficSystem()
+    return api, system
+
+
+try:
+    with st.spinner("Initializing Map Engine & Coordinate DB..."):
+        # 修正：不再加载 bg_geojson
+        api, system = load_static_resources()
+except Exception as e:
+    st.error(f"Failed to load static resources: {e}")
+    st.stop()
+
+
+# ==========================
+# 2. Dynamic Data Loading
+# ==========================
+@st.cache_data(ttl=60, show_spinner=False)
+def fetch_realtime_data():
     snapshot = {}
-
-    # 这里的进度条会比之前快很多
-    progress_bar = st.progress(0, text="正在并发同步实时数据...")
-
     stations = sorted(api.target_stations.items())
+
+    progress_bar = st.progress(0, text="Syncing Real-time Delay Data...")
     total = len(stations)
 
     for idx, (name, sid) in enumerate(stations):
@@ -77,39 +101,35 @@ def fetch_live_data():
 
 
 try:
-    with st.spinner("正在连接 DB 实时路网..."):
-        data = fetch_live_data()
+    data = fetch_realtime_data()
 except Exception as e:
-    st.error(f"数据同步失败: {e}")
+    st.error(f"Real-time sync failed: {e}")
     data = {}
 
 if "selected_station" not in st.session_state:
     st.session_state.selected_station = None
 
-# === 2. 侧边栏 ===
+# ==========================
+# 3. Sidebar Navigation
+# ==========================
 with st.sidebar:
     st.title("🚆 UrbanPulse")
+    st.markdown("### Railway Resilience Analysis")
 
-    if st.button("🔄 强制刷新"):
-        fetch_live_data.clear()
+    if st.button("🔄 Refresh Data"):
+        fetch_realtime_data.clear()
         st.rerun()
 
-    mode = st.radio("视图模式", ["🗺️ 2D 实时监控", "🌐 3D 全网透视", "📊 数据洞察"])
+    mode = st.radio("View Mode", ["🗺️ 2D Monitor", "🌐 3D Perspective", "📊 Data Insights"], index=0)
 
     st.divider()
 
-    if mode != "📊 数据洞察":
-        st.subheader("📍 核心枢纽")
-        # 快速定位下拉框
-        options = ["- 全局视图 -"] + list(data.keys())
-        # 找出当前选中的 index
-        curr_idx = 0
-        if st.session_state.selected_station in options:
-            curr_idx = options.index(st.session_state.selected_station)
+    if mode != "📊 Data Insights":
+        st.subheader("📍 Quick Locate")
+        station_names = list(data.keys())
+        selected = st.selectbox("Select Station", ["- Global View -"] + station_names)
 
-        selected = st.selectbox("选择站点", options, index=curr_idx)
-
-        if selected != "- 全局视图 -" and selected != st.session_state.selected_station:
+        if selected != "- Global View -" and selected != st.session_state.selected_station:
             st.session_state.selected_station = selected
             st.rerun()
 
@@ -117,17 +137,23 @@ with st.sidebar:
             node = st.session_state.selected_station
             info = data.get(node)
             if info:
-                st.metric("当前延误", f"{info['avg_delay']:.1f} min")
-                st.caption("发车列表:")
+                st.metric("Current Delay", f"{info['avg_delay']:.1f} min")
+                st.metric("Impact Index", f"{info['impact']:.1f}")
+                st.caption("Departing Trains:")
+
                 for train in info['details']:
                     if not train['dest_coords']: continue
-                    icon = "🔴" if train['delay'] > 5 else "🟢"
-                    st.write(f"{icon} **{train['line']}** → {train['to']}")
 
-# === 3. 主视图 ===
+                    delay_val = train['delay']
+                    icon = "🔴" if delay_val > 5 else "🟢"
+                    st.write(f"{icon} **{train['line']}** → {train['to']} (+{delay_val:.0f} min)")
 
-if mode == "🗺️ 2D 实时监控":
-    st.header("实时路网监控 (2D)")
+# ==========================
+# 4. Main View Logic
+# ==========================
+
+if mode == "🗺️ 2D Monitor":
+    st.header("Real-time Network Monitor (2D)")
 
     map_center = [51.1657, 10.4515]
     zoom = 6
@@ -139,29 +165,28 @@ if mode == "🗺️ 2D 实时监控":
 
     m = folium.Map(location=map_center, zoom_start=zoom, tiles="CartoDB dark_matter", min_zoom=6)
 
-    # === 关键优化：使用 OpenRailwayMap 在线图层作为背景 ===
-    # 不加载本地文件，速度极快，但依然能看到所有铁轨细节
+    # A. Static Background (OpenRailwayMap Online Layer)
     folium.TileLayer(
         tiles="https://{s}.tiles.openrailwaymap.org/standard/{z}/{x}/{y}.png",
         attr='OpenRailwayMap',
-        name="Railways",
+        name="Rail Network",
         overlay=True,
-        opacity=0.4  # 调低透明度，让它成为背景，不抢红绿线的风头
+        opacity=0.4
     ).add_to(m)
 
-    # A. 动态点
+    # B. Dynamic Points
     for name, info in data.items():
         if not info['pos']: continue
         is_selected = (name == st.session_state.selected_station)
         color = get_traffic_color(info['avg_delay'])
-        radius = 12 if is_selected else 6
+        radius = 12 if is_selected else 5
 
         folium.CircleMarker(
             location=info['pos'], radius=radius, color=color, fill=True, fill_color=color,
             fill_opacity=1.0 if is_selected else 0.8, tooltip=f"{name} (+{info['avg_delay']:.0f}min)", popup=None
         ).add_to(m)
 
-    # B. 动态线
+    # C. Dynamic Lines
     if st.session_state.selected_station:
         node = st.session_state.selected_station
         info = data.get(node)
@@ -173,15 +198,16 @@ if mode == "🗺️ 2D 实时监控":
                 real_shape = train.get('real_shape')
                 line_color = get_traffic_color(train['delay'])
 
-                # 有真实形状画实线，没形状画虚线
+                tooltip_text = f"{train['line']} -> {train['to']} (+{train['delay']:.0f} min)"
+
                 if real_shape:
                     folium.PolyLine(locations=real_shape, color=line_color, weight=4, opacity=0.9,
-                                    tooltip=train['line']).add_to(m)
+                                    tooltip=tooltip_text).add_to(m)
                 else:
-                    folium.PolyLine(locations=[start, end], color=line_color, weight=2, opacity=0.7,
-                                    dash_array='5,10').add_to(m)
+                    folium.PolyLine(locations=[start, end], color=line_color, weight=2, opacity=0.8, dash_array='5,10',
+                                    tooltip=tooltip_text).add_to(m)
 
-    output = st_folium(m, width=1200, height=750, key="folium_map")
+    output = st_folium(m, width=1400, height=800, key="folium_map")
 
     if output['last_object_clicked']:
         clicked = output['last_object_clicked']
@@ -191,13 +217,14 @@ if mode == "🗺️ 2D 实时监控":
                 st.session_state.selected_station = name
                 st.rerun()
 
-elif mode == "🌐 3D 全网透视":
-    st.header("全网 3D 透视")
+elif mode == "🌐 3D Perspective":
+    st.header("3D Network Perspective")
+    st.caption("Visualizing long-distance connections and delay propagation using ArcLayer")
     deck = create_3d_map(data, st.session_state.selected_station)
     st.pydeck_chart(deck)
 
-elif mode == "📊 数据洞察":
-    st.header("网络韧性分析报告")
+elif mode == "📊 Data Insights":
+    st.header("Network Resilience Report")
     table_data = []
     for name, info in data.items():
         table_data.append({
@@ -210,8 +237,8 @@ elif mode == "📊 数据洞察":
 
     c1, c2 = st.columns([2, 1])
     with c1:
-        st.subheader("💥 关键节点排行")
+        st.subheader("💥 Critical Nodes Ranking")
         st.dataframe(df.style.background_gradient(subset=['Impact Score'], cmap='Reds'), use_container_width=True)
     with c2:
-        st.subheader("📉 延误分布")
+        st.subheader("📉 Delay Distribution")
         st.bar_chart(df.set_index("Station")['Delay (min)'])
