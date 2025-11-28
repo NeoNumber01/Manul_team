@@ -52,7 +52,6 @@ def get_traffic_color_rgb(delay_min):
 def load_static_resources():
     """
     Load heavy static assets (API client, Algorithm system).
-    REMOVED: osm_loader (No longer needed)
     """
     api = TransportAPI()
     system = TrafficSystem()
@@ -61,7 +60,6 @@ def load_static_resources():
 
 try:
     with st.spinner("Initializing Map Engine & Coordinate DB..."):
-        # 修正：不再加载 bg_geojson
         api, system = load_static_resources()
 except Exception as e:
     st.error(f"Failed to load static resources: {e}")
@@ -71,32 +69,36 @@ except Exception as e:
 # ==========================
 # 2. Dynamic Data Loading
 # ==========================
-@st.cache_data(ttl=60, show_spinner=False)
+# 关键修改：ttl=3600 (1小时)。这意味着演示期间它绝不会自动刷新卡顿！
+# 只有当你点击"Refresh Data"按钮时，它才会更新。
+@st.cache_data(ttl=3600, show_spinner=False)
 def fetch_realtime_data():
     snapshot = {}
     stations = sorted(api.target_stations.items())
 
-    progress_bar = st.progress(0, text="Syncing Real-time Delay Data...")
-    total = len(stations)
+    # 使用 st.status 代替 progress bar，体验更流畅
+    with st.status("Fetching Real-time Data...", expanded=True) as status:
+        total = len(stations)
+        for idx, (name, sid) in enumerate(stations):
+            # 给用户一点文字反馈，让他知道没死机
+            status.write(f"Syncing {name}...")
 
-    for idx, (name, sid) in enumerate(stations):
-        coords = api.get_coords(name)
-        if not coords: continue
+            coords = api.get_coords(name)
+            if not coords: continue
 
-        avg_delay, details = api.get_realtime_departures(sid)
-        rank = system.get_rank(name)
-        impact = avg_delay * rank * 1000
+            avg_delay, details = api.get_realtime_departures(sid)
+            rank = system.get_rank(name)
+            impact = avg_delay * rank * 1000
 
-        snapshot[name] = {
-            "pos": coords,
-            "avg_delay": avg_delay,
-            "details": details,
-            "rank": rank,
-            "impact": impact
-        }
-        progress_bar.progress((idx + 1) / total)
+            snapshot[name] = {
+                "pos": coords,
+                "avg_delay": avg_delay,
+                "details": details,
+                "rank": rank,
+                "impact": impact
+            }
+        status.update(label="Data Sync Complete!", state="complete", expanded=False)
 
-    progress_bar.empty()
     return snapshot
 
 
@@ -116,7 +118,8 @@ with st.sidebar:
     st.title("🚆 UrbanPulse")
     st.markdown("### Railway Resilience Analysis")
 
-    if st.button("🔄 Refresh Data"):
+    # 刷新按钮：只有点击这里，才会触发加载
+    if st.button("🔄 Refresh Data Now"):
         fetch_realtime_data.clear()
         st.rerun()
 
