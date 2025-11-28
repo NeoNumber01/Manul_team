@@ -3,29 +3,28 @@ import pydeck as pdk
 
 def create_3d_map(station_data, selected_station=None):
     """
-    生成 PyDeck 3D 地图
+    Generate PyDeck 3D Map (English Version)
     """
     station_layers_data = []
     path_layers_data = []
 
-    # 1. 准备数据
+    # 1. Prepare Data
     for name, info in station_data.items():
         if not info['pos']: continue
 
-        # 坐标转换 (Lat, Lon) -> (Lon, Lat)
+        # Transform coords (Lat, Lon) -> (Lon, Lat)
         lat, lon = info['pos']
 
-        # 颜色逻辑
+        # Color logic
         delay = info['avg_delay']
-        # RGB 颜色: 绿 -> 黄 -> 红
         if delay < 1:
-            color = [0, 255, 128]
+            color = [0, 255, 128]  # Green
         elif delay < 10:
-            color = [255, 200, 0]
+            color = [255, 200, 0]  # Yellow
         else:
-            color = [255, 0, 0]
+            color = [255, 0, 0]  # Red
 
-        # 选中变大
+        # Radius logic
         radius = 2000 if name == selected_station else 500
 
         station_layers_data.append({
@@ -36,8 +35,7 @@ def create_3d_map(station_data, selected_station=None):
             "delay": f"{delay:.1f} min"
         })
 
-        # 线路逻辑
-        # 如果有选中站点，只画相关的线；否则画所有线
+        # Line logic
         is_active = (name == selected_station)
         if selected_station and not is_active:
             continue
@@ -50,7 +48,6 @@ def create_3d_map(station_data, selected_station=None):
 
             path = []
             if real_shape:
-                # real_shape 是 [(lat, lon)...], PyDeck 要 [(lon, lat)...]
                 path = [[p[1], p[0]] for p in real_shape]
             else:
                 path = [[lon, lat], [dest_lon, dest_lat]]
@@ -65,7 +62,7 @@ def create_3d_map(station_data, selected_station=None):
                 "width": width
             })
 
-    # 2. 定义图层
+    # 2. Define Layers
     layer_stations = pdk.Layer(
         "ScatterplotLayer",
         station_layers_data,
@@ -85,10 +82,10 @@ def create_3d_map(station_data, selected_station=None):
         get_width="width",
         width_min_pixels=2,
         pickable=True,
-        auto_highlight=True
+        auto_highlight=True,
     )
 
-    # 3. 视角设置
+    # 3. View State
     view_state = pdk.ViewState(
         latitude=51.1657, longitude=10.4515, zoom=6, pitch=45, bearing=0
     )
@@ -99,12 +96,13 @@ def create_3d_map(station_data, selected_station=None):
             latitude=sel_lat, longitude=sel_lon, zoom=8, pitch=50, bearing=20
         )
 
-    # 4. 渲染 Deck (关键：使用 carto_dark 风格)
+    # 4. Render Deck
     r = pdk.Deck(
         layers=[layer_paths, layer_stations],
         initial_view_state=view_state,
-        map_style=pdk.map_styles.CARTO_DARK,  # <--- 这里确保了不是白纸！
-        tooltip={"text": "{name}"}
+        map_style=pdk.map_styles.CARTO_DARK,
+        # Translated Tooltip
+        tooltip={"html": "<b>{name}</b><br/>Avg Delay: {delay}"}
     )
 
     return r
