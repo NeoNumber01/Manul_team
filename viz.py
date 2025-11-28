@@ -3,106 +3,77 @@ import pydeck as pdk
 
 def create_3d_map(station_data, selected_station=None):
     """
-    Generate PyDeck 3D Map (English Version)
+    Generate 3D map using ArcLayer for smooth, elevated curved arrows
     """
-    station_layers_data = []
-    path_layers_data = []
 
-    # 1. Prepare Data
+    arc_data = []
+
     for name, info in station_data.items():
-        if not info['pos']: continue
+        if not info["pos"]:
+            continue
 
-        # Transform coords (Lat, Lon) -> (Lon, Lat)
-        lat, lon = info['pos']
+        source_lat, source_lon = info["pos"]
+        is_active = name == selected_station
 
-        # Color logic
-        delay = info['avg_delay']
-        if delay < 1:
-            color = [0, 255, 128]  # Green
-        elif delay < 10:
-            color = [255, 200, 0]  # Yellow
-        else:
-            color = [255, 0, 0]  # Red
-
-        # Radius logic
-        radius = 2000 if name == selected_station else 500
-
-        station_layers_data.append({
-            "name": name,
-            "coordinates": [lon, lat],
-            "color": color,
-            "radius": radius,
-            "delay": f"{delay:.1f} min"
-        })
-
-        # Line logic
-        is_active = (name == selected_station)
+        # If a station is selected — only show its routes
         if selected_station and not is_active:
             continue
 
-        for train in info['details']:
-            if not train['dest_coords']: continue
+        for train in info["details"]:
+            if not train["dest_coords"]:
+                continue
 
-            real_shape = train.get('real_shape')
-            dest_lat, dest_lon = train['dest_coords']
+            dest_lat, dest_lon = train["dest_coords"]
+            delay = train["delay"]
 
-            path = []
-            if real_shape:
-                path = [[p[1], p[0]] for p in real_shape]
-            else:
-                path = [[lon, lat], [dest_lon, dest_lat]]
+            # Color of the arc based on the delay
+            color = [255, 0, 0] if delay > 10 else [255, 200, 0] if delay > 1 else [0, 255, 128]
 
-            line_color = [255, 50, 50] if train['delay'] > 5 else [0, 200, 255]
-            width = 80 if is_active else 30
-
-            path_layers_data.append({
-                "path": path,
-                "color": line_color,
-                "name": f"{train['line']} -> {train['to']}",
-                "width": width
+            arc_data.append({
+                "from_position": [source_lon, source_lat],
+                "to_position": [dest_lon, dest_lat],
+                "color": color,
+                "name": f"{train['line']} → {train['to']} ({delay:.1f} min)",
+                "width": 4 if is_active else 2
             })
 
-    # 2. Define Layers
-    layer_stations = pdk.Layer(
-        "ScatterplotLayer",
-        station_layers_data,
-        get_position="coordinates",
-        get_fill_color="color",
-        get_radius="radius",
-        pickable=True,
-        opacity=0.9,
-        filled=True
-    )
-
-    layer_paths = pdk.Layer(
-        "PathLayer",
-        path_layers_data,
-        get_path="path",
-        get_color="color",
+    # ArcLayer: curved, elevated arrows
+    layer_arcs = pdk.Layer(
+        "ArcLayer",
+        data=arc_data,
+        get_source_position="from_position",
+        get_target_position="to_position",
+        get_source_color="color",
+        get_target_color="color",
         get_width="width",
         width_min_pixels=2,
         pickable=True,
-        auto_highlight=True,
+        auto_highlight=True
     )
 
-    # 3. View State
+    # Camera/View configuration
     view_state = pdk.ViewState(
-        latitude=51.1657, longitude=10.4515, zoom=6, pitch=45, bearing=0
+        latitude=51.1657,
+        longitude=10.4515,
+        zoom=6,
+        pitch=60,
+        bearing=45
     )
 
     if selected_station and selected_station in station_data:
-        sel_lat, sel_lon = station_data[selected_station]['pos']
+        sel_lat, sel_lon = station_data[selected_station]["pos"]
         view_state = pdk.ViewState(
-            latitude=sel_lat, longitude=sel_lon, zoom=8, pitch=50, bearing=20
+            latitude=sel_lat,
+            longitude=sel_lon,
+            zoom=8,
+            pitch=60,
+            bearing=45
         )
 
-    # 4. Render Deck
-    r = pdk.Deck(
-        layers=[layer_paths, layer_stations],
+    # Final render
+    return pdk.Deck(
+        layers=[layer_arcs],
         initial_view_state=view_state,
         map_style=pdk.map_styles.CARTO_DARK,
-        # Translated Tooltip
-        tooltip={"html": "<b>{name}</b><br/>Avg Delay: {delay}"}
+        tooltip={"html": "<b>{name}</b>"}
     )
-
-    return r
