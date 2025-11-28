@@ -7,18 +7,36 @@ from core.traffic_system import TrafficSystem
 st.set_page_config(layout="wide", page_title="DB Impact Monitor")
 
 
-# === 1. 数据加载 (含真实路径下载) ===
+# === 0. 核心：颜色渐变算法 ===
+def get_traffic_color(delay_min):
+    """
+    根据延误时间返回 hex 颜色
+    """
+    if delay_min < 1:
+        return "#00cc66"  # 🟢 准点 (绿色)
+    elif delay_min < 4:
+        return "#aadd22"  # 🟡 轻微 (黄绿)
+    elif delay_min < 10:
+        return "#ffcc00"  # 🟠 拥堵 (黄色)
+    elif delay_min < 20:
+        return "#ff6600"  # 🔴 严重 (橙红)
+    elif delay_min < 60:
+        return "#cc0000"  # 🛑 极其严重 (深红)
+    else:
+        return "#9900cc"  # 🟣 瘫痪 (紫色)
+
+
+# === 1. 数据加载 ===
 @st.cache_resource
 def load_data():
     api = TransportAPI()
     system = TrafficSystem()
     snapshot = {}
 
-    # 进度条 (下载形状会慢一点点，给用户反馈)
-    progress_bar = st.progress(0, text="正在同步全德路网及真实轨迹...")
+    # 提示用户耐心等待形状下载
+    progress_bar = st.progress(0, text="正在同步路网并计算真实轨迹 (需下载大量数据)...")
 
     total = len(api.target_stations)
-    # 按名字排序，让列表更好看
     sorted_stations = sorted(api.target_stations.items())
 
     for idx, (name, sid) in enumerate(sorted_stations):
@@ -42,158 +60,163 @@ def load_data():
     return snapshot
 
 
-# 加载数据
 try:
     data = load_data()
 except Exception as e:
     st.error(f"数据加载异常: {e}")
     data = {}
 
-# === 2. 状态管理 ===
 if "selected_station" not in st.session_state:
     st.session_state.selected_station = None
 
-# === 3. 界面布局 ===
+# === 3. 界面 ===
 st.title("🚆 UrbanPulse: 实时故障传导分析")
 
-col1, col2 = st.columns([1, 2.5])
+col1, col2 = st.columns([1, 3])
 
-# --- 左侧：全网站点列表 (恢复你要的功能) ---
+# --- 左侧：列表 ---
 with col1:
-    st.subheader("📋 全网实时监控")
-    st.caption("点击列表可直接定位，或点击地图查看")
+    st.subheader("📋 核心枢纽状态")
 
-    if not data:
-        st.warning("暂无数据")
-
-    # 遍历所有站点，生成列表
     for name, info in data.items():
         delay = info['avg_delay']
-        # 状态灯
-        status_icon = "🔴" if delay > 5 else "🟢"
+        # 使用我们的新颜色函数来给左侧文字也上色
+        color_hex = get_traffic_color(delay)
 
-        # 标题显示：站名 + 延误时长
-        label = f"{status_icon} {name} (+{delay:.0f}min)"
+        # Streamlit 的 markdown 支持颜色
+        label = f"{name} (+{delay:.0f}min)"
 
-        # 如果是当前选中的站点，默认展开
         is_expanded = (st.session_state.selected_station == name)
 
         with st.expander(label, expanded=is_expanded):
-            # 1. 核心指标
+            # 显示带颜色的指标
+            st.markdown(f"#### 状态颜色: <span style='color:{color_hex}'>■■■■■</span>", unsafe_allow_html=True)
+
             c1, c2 = st.columns(2)
-            c1.metric("PageRank", f"{info['rank']:.4f}")
+            c1.metric("Rank", f"{info['rank']:.4f}")
             c2.metric("Impact", f"{info['impact']:.1f}")
 
-            # 2. 定位按钮
             if st.button(f"📍 定位 {name}", key=f"btn_{name}"):
                 st.session_state.selected_station = name
                 st.rerun()
 
             st.markdown("---")
-            st.caption("🚦 实时发车详情 (含轨迹状态):")
-
-            # 3. 详细文字列表
-            visible_lines = 0
             for train in info['details']:
+                if not train['dest_coords']: continue
+
                 d_time = train['delay']
-                line_icon = "🔴" if d_time > 5 else "🟢"
+                # 每一行文字也根据延误变色
+                line_color = get_traffic_color(d_time)
+                shape_icon = "〰️" if train.get('real_shape') else "📏"
 
-                # 图标：〰️=真实弯道, 📏=直线, ❌=无法画图
-                shape_icon = "〰️" if train.get('real_shape') else ("📏" if train['dest_coords'] else "❌")
+                html_text = f"<span style='color:{line_color}'><b>{train['line']}</b> → {train['to']} (+{d_time:.0f}) {shape_icon}</span>"
+                st.markdown(html_text, unsafe_allow_html=True)
 
-                if train['dest_coords']: visible_lines += 1
-
-                st.write(f"{line_icon} {shape_icon} **{train['line']}** → {train['to']} (+{d_time:.0f})")
-
-            if visible_lines == 0:
-                st.caption("⚠️ 暂无地理数据")
-
-# --- 右侧：地图 (含真实铁路网底图) ---
+# --- 右侧：地图 ---
 with col2:
-    map_center = [50.5, 10.0]
+    map_center = [51.1657, 10.4515]
     zoom = 6
 
-    # 选中时自动聚焦
     if st.session_state.selected_station:
-        sel_node = st.session_state.selected_station
-        if sel_node in data and data[sel_node]['pos']:
-            map_center = data[sel_node]['pos']
-            zoom = 9
+        sel_info = data.get(st.session_state.selected_station)
+        if sel_info:
+            map_center = sel_info['pos']
+            zoom = 8
 
-    m = folium.Map(location=map_center, zoom_start=zoom, tiles="CartoDB dark_matter")
+    m = folium.Map(
+        location=map_center,
+        zoom_start=zoom,
+        tiles="CartoDB dark_matter",
+        min_zoom=6,
+        max_bounds=True,
+        min_lat=47.0, max_lat=55.5,
+        min_lon=5.5, max_lon=15.5
+    )
 
-    # 1. 叠加 OpenRailwayMap (真实铁轨层)
-    folium.TileLayer(
-        tiles="https://{s}.tiles.openrailwaymap.org/standard/{z}/{x}/{y}.png",
-        attr='OpenRailwayMap',
-        name="Railways",
-        overlay=True,
-        opacity=0.5
-    ).add_to(m)
-
-    # 2. 画站点圆点
+    # A. 绘制所有站点
     for name, info in data.items():
         if not info['pos']: continue
-        color = "#ff4b4b" if info['avg_delay'] > 5 else "#00c0f2"
 
-        # 选中变大
-        radius = 10 if name == st.session_state.selected_station else 6
-        opacity = 1.0 if name == st.session_state.selected_station else 0.8
+        is_selected = (name == st.session_state.selected_station)
+
+        # 颜色逻辑升级
+        circle_color = get_traffic_color(info['avg_delay'])
+
+        radius = 12 if is_selected else 5
+        opacity = 1.0 if is_selected else 0.8
 
         folium.CircleMarker(
             location=info['pos'],
             radius=radius,
-            color=color,
+            color=circle_color,  # 边框颜色
             fill=True,
-            fill_color=color,
+            fill_color=circle_color,  # 填充颜色
             fill_opacity=opacity,
-            tooltip=f"{name}",
+            weight=2,
+            tooltip=f"{name} (+{info['avg_delay']:.0f}min)",
             popup=None
         ).add_to(m)
 
-    # 3. 画连线 (混合模式：真实弯道 + 直线)
+    # B. 绘制连线
+    # 1. 背景线 (为了不乱，背景线还是保持暗淡，不参与彩色)
+    for name, info in data.items():
+        if name == st.session_state.selected_station: continue
+        start = info['pos']
+        for train in info['details']:
+            end = train['dest_coords']
+            if not end: continue
+            real_shape = train.get('real_shape')
+
+            style = {'color': '#333333', 'weight': 1, 'opacity': 0.3}
+            if real_shape:
+                folium.PolyLine(locations=real_shape, **style).add_to(m)
+            else:
+                folium.PolyLine(locations=[start, end], **style).add_to(m)
+
+    # 2. 高亮线 (使用渐变色！)
     if st.session_state.selected_station:
         node = st.session_state.selected_station
         info = data.get(node)
-
-        if info and info['pos']:
+        if info:
             start = info['pos']
-
             for train in info['details']:
                 end = train['dest_coords']
+                if not end: continue
+
                 real_shape = train.get('real_shape')
 
-                is_delayed = train['delay'] > 5
-                line_color = "#ff4b4b" if is_delayed else "#00c0f2"
+                # === 核心：使用渐变色 ===
+                line_color = get_traffic_color(train['delay'])
 
-                # 情况 A: 有真实轨迹 -> 画实线
                 if real_shape:
                     folium.PolyLine(
                         locations=real_shape,
                         color=line_color,
                         weight=4,
                         opacity=0.9,
-                        tooltip=f"REAL: {train['line']} -> {train['to']}"
+                        tooltip=f"{train['line']} (+{train['delay']:.0f}min)"
                     ).add_to(m)
-
-                # 情况 B: 只有终点坐标 -> 画虚线
-                elif end:
+                else:
+                    # 如果是直线，用虚线区分
                     folium.PolyLine(
                         locations=[start, end],
-                        color=line_color,  # 颜色淡一点
+                        color=line_color,
                         weight=2,
-                        opacity=0.6,
-                        dash_array='5, 10',  # 虚线表示"逻辑连接"
-                        tooltip=f"LOGICAL: {train['line']} -> {train['to']}"
+                        opacity=0.8,
+                        dash_array='5, 10',
+                        tooltip=f"{train['line']} (直线预估)"
                     ).add_to(m)
 
-    # 4. 渲染与点击
     output = st_folium(m, width=900, height=700, key="main_map")
 
     if output['last_object_clicked']:
         clicked = output['last_object_clicked']
         if 'tooltip' in clicked:
-            name = clicked['tooltip']
+            # tooltip 现在包含 "+5min" 等字样，需要清洗提取名字
+            raw_text = clicked['tooltip']
+            # 比如 "Heilbronn Hbf (+5min)" -> 取第一个括号前的内容
+            name = raw_text.split(" (")[0]
+
             if name in data and st.session_state.selected_station != name:
                 st.session_state.selected_station = name
                 st.rerun()
