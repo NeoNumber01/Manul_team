@@ -3,6 +3,7 @@ import time
 import json
 import os
 import polyline
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 class TransportAPI:
@@ -16,11 +17,9 @@ class TransportAPI:
             "lon_min": 5.5, "lon_max": 15.5
         }
 
-        # 1. 加载站点坐标库 (stations_db.json)
         self.load_station_database()
 
-        # 2. 加载路线形状缓存 (shapes_cache.json)
-        # 这是我们新增的"黑科技"，用来存铁轨形状
+        # === 缓存系统 ===
         self.shapes_cache = {}
         self.shapes_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'shapes_cache.json')
         self.load_shapes_cache()
@@ -41,7 +40,6 @@ class TransportAPI:
         }
 
     def load_station_database(self):
-        """加载站点坐标"""
         try:
             path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'stations_db.json')
             with open(path, 'r', encoding='utf-8') as f:
@@ -54,24 +52,19 @@ class TransportAPI:
             self.station_lookup = {}
 
     def load_shapes_cache(self):
-        """加载本地已保存的路线形状"""
         if os.path.exists(self.shapes_file):
             try:
                 with open(self.shapes_file, 'r', encoding='utf-8') as f:
                     self.shapes_cache = json.load(f)
-                print(f"📂 已加载本地路线缓存: {len(self.shapes_cache)} 条线路")
             except:
                 self.shapes_cache = {}
-        else:
-            print("ℹ️ 本地无路线缓存，将从 API 获取并创建...")
 
     def save_shapes_cache(self):
-        """把新抓到的路线保存到硬盘"""
         try:
             with open(self.shapes_file, 'w', encoding='utf-8') as f:
                 json.dump(self.shapes_cache, f)
         except Exception as e:
-            print(f"缓存保存失败: {e}")
+            print(f"Cache save failed: {e}")
 
     def is_in_germany(self, lat, lon):
         return (self.GERMANY_BOUNDS["lat_min"] <= lat <= self.GERMANY_BOUNDS["lat_max"] and
@@ -85,22 +78,11 @@ class TransportAPI:
             if clean_name in k: return v
         return None
 
-    def get_trip_shape(self, trip_id, line_name, origin, destination):
-        """
-        智能获取形状：先查本地缓存，没有再去 API 下载
-        Key = "线路名_起点_终点" (例如: ICE 702_Munich_Berlin)
-        """
-        # 生成唯一指纹 (指纹不包含 trip_id，因为 trip_id 每天都变，但路不变)
-        cache_key = f"{line_name}_{origin}_{destination}"
-
-        # 1. 查本地缓存 (极速)
-        if cache_key in self.shapes_cache:
-            return self.shapes_cache[cache_key]
-
-        # 2. 本地没有，去 API 下载 (慢)
+    def _fetch_single_shape(self, trip_id):
+        """线程池调用的单个下载函数"""
         try:
-            # 限制请求频率
-            time.sleep(0.25)
+            # 这里的 sleep 对于并发来说是每个线程独立的
+            # 如果并发5个，相当于同时在等，效率高5倍
             url = f"{self.base_url}/trips/{trip_id}?polyline=true"
             res = requests.get(url, timeout=3)
 
@@ -108,27 +90,23 @@ class TransportAPI:
                 data = res.json()
                 encoded = data.get('trip', {}).get('polyline')
                 if encoded:
-                    points = polyline.decode(encoded)
-
-                    # 存入缓存并保存到文件
-                    self.shapes_cache[cache_key] = points
-                    self.save_shapes_cache()  # 实时保存，越用越聪明
-
-                    return points
+                    return polyline.decode(encoded)
+            return None
         except:
-            pass
-
-        return None
+            return None
 
     def get_realtime_departures(self, station_id):
+        """
+        [终极版] 并发下载 + 本地缓存
+        """
         try:
-            # 获取当前站点的名字 (用于缓存 Key)
+            # 获取当前站名用于生成 Cache Key
             origin_name = "Unknown"
             for k, v in self.target_stations.items():
                 if v == station_id: origin_name = k; break
 
             url = f"{self.base_url}/stops/{station_id}/departures"
-            params = {"duration": 120, "results": 20, "when": "now"}
+            params = {"duration": 120, "results": 15, "when": "now"}
 
             res = requests.get(url, params=params, timeout=5)
             if res.status_code != 200: return 0, []
@@ -139,7 +117,13 @@ class TransportAPI:
             details = []
             delays = []
 
-            for dep in departures:
+            # 1. 预处理：找出哪些需要去网上下，哪些可以直接读缓存
+            tasks = []  # (index, trip_id, cache_key)
+
+            # 临时列表，保持顺序
+            temp_results = [None] * len(departures)
+
+            for i, dep in enumerate(departures):
                 delay = dep.get('delay', 0) or 0
                 delay_min = abs(delay) / 60
                 delays.append(delay_min)
@@ -147,26 +131,63 @@ class TransportAPI:
                 direction = dep.get('direction', 'Unknown')
                 dest_coords = self.get_coords(direction)
 
+                # 如果没终点，直接跳过画线
                 if not dest_coords: continue
 
                 trip_id = dep.get('tripId')
                 line_name = dep.get('line', {}).get('name', '?')
+
+                # 构造缓存 Key
+                cache_key = f"{line_name}_{origin_name}_{direction}"
+
                 real_shape = None
 
-                # === 智能形状获取 ===
-                if trip_id:
-                    real_shape = self.get_trip_shape(trip_id, line_name, origin_name, direction)
+                # A. 查缓存 (极速)
+                if cache_key in self.shapes_cache:
+                    real_shape = self.shapes_cache[cache_key]
+                # B. 没缓存 -> 加入待下载队列
+                elif trip_id:
+                    tasks.append((i, trip_id, cache_key))
 
-                details.append({
+                # 先存入基本信息
+                temp_results[i] = {
                     "line": line_name,
                     "to": direction,
                     "delay": delay_min,
                     "dest_coords": dest_coords,
-                    "real_shape": real_shape
-                })
+                    "real_shape": real_shape  # 如果缓存有，这里就有值；否则是 None
+                }
+
+            # 2. 并发下载缺失的形状 (如果有的话)
+            if tasks:
+                # print(f"🚀 {origin_name}: 正在并发下载 {len(tasks)} 条新线路形状...")
+                with ThreadPoolExecutor(max_workers=5) as executor:
+                    # 提交所有任务
+                    future_to_info = {
+                        executor.submit(self._fetch_single_shape, t[1]): t
+                        for t in tasks
+                    }
+
+                    for future in as_completed(future_to_info):
+                        idx, trip_id, cache_key = future_to_info[future]
+                        shape = future.result()
+
+                        if shape:
+                            # 填回结果列表
+                            if temp_results[idx]:
+                                temp_results[idx]['real_shape'] = shape
+                            # 更新内存缓存
+                            self.shapes_cache[cache_key] = shape
+
+                # 3. 下载完一批后，保存到硬盘 (增量更新)
+                self.save_shapes_cache()
+
+            # 4. 清理 None 并返回
+            details = [x for x in temp_results if x is not None]
 
             avg = sum(delays) / len(delays) if delays else 0
             return avg, details
+
         except Exception as e:
             print(f"API Error: {e}")
             return 0, []
