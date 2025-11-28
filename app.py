@@ -3,13 +3,132 @@ from streamlit_folium import st_folium
 import folium
 import pandas as pd
 import time
+import os
 
 # Core Modules
 from data.api_client import TransportAPI
 from core.traffic_system import TrafficSystem
 from viz import create_3d_map
 
-st.set_page_config(layout="wide", page_title="DB UrbanPulse")
+# === 1. 页面基础配置 ===
+st.set_page_config(
+    layout="wide",
+    page_title="Central Command",
+    page_icon="★",
+    initial_sidebar_state="expanded"
+)
+
+
+# === 2. 注入苏联风 CSS ===
+def inject_custom_css():
+    st.markdown("""
+        <style>
+        /* 1. 字体 */
+        @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap');
+
+        html, body, [class*="css"] {
+            font-family: 'Share Tech Mono', monospace;
+            background-color: #121212; /* 深黑背景 */
+            color: #E0E0E0;
+        }
+
+        /* 2. 顶部 Header */
+        .header-container {
+            background-color: #8B0000; /* 深红 */
+            padding: 1.5rem;
+            border: 2px solid #FFD700; /* 金色边框 */
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            box-shadow: 5px 5px 0px #000;
+        }
+        .header-title {
+            color: #FFD700;
+            font-size: 28px;
+            font-weight: 900;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+        }
+        .header-subtitle {
+            color: #FFC0C0;
+            font-size: 14px;
+            text-transform: uppercase;
+        }
+
+        /* 3. 指标卡片 */
+        div[data-testid="stMetric"] {
+            background-color: #1E1E1E;
+            border: 1px solid #555;
+            border-left: 5px solid #FFD700;
+            padding: 10px;
+            border-radius: 0px !important;
+        }
+        div[data-testid="stMetric"] label {
+            color: #FFD700 !important;
+            font-size: 0.8rem;
+            text-transform: uppercase;
+        }
+        div[data-testid="stMetric"] div[data-testid="stMetricValue"] {
+            color: #FFFFFF !important;
+            font-size: 1.5rem;
+        }
+
+        /* 4. 侧边栏 */
+        section[data-testid="stSidebar"] {
+            background-color: #080808;
+            border-right: 2px solid #8B0000;
+        }
+
+        /* 5. 按钮 */
+        button {
+            border-radius: 0px !important;
+            border: 1px solid #FFD700 !important;
+            background-color: #330000 !important;
+            color: #FFD700 !important;
+            text-transform: uppercase;
+            font-weight: bold;
+        }
+        button:hover {
+            background-color: #FFD700 !important;
+            color: #000000 !important;
+        }
+
+        /* 6. 列表项 */
+        .train-list-item {
+            padding: 10px;
+            margin-bottom: 8px;
+            background-color: #1A1A1A;
+            border: 1px solid #333;
+            border-left: 4px solid #333;
+            font-size: 0.9rem;
+        }
+        .status-critical { border-left-color: #FF0000; color: #FFaaaa; }
+        .status-normal { border-left-color: #00FF00; color: #ccffcc; }
+
+        #MainMenu {visibility: hidden;}
+        footer {visibility: hidden;}
+        header {visibility: hidden;}
+        </style>
+    """, unsafe_allow_html=True)
+
+
+inject_custom_css()
+
+# === 3. 自定义 Header ===
+st.markdown("""
+    <div class="header-container">
+        <div>
+            <div class="header-title">★ CENTRAL RAILWAY COMMAND</div>
+            <div class="header-subtitle">State Infrastructure Monitoring Bureau | Section: DE-GRID</div>
+        </div>
+        <div style="text-align:right; font-family:'Courier New'; font-size: 12px;">
+            <span style="color:#FFD700">STATUS:</span> OPERATIONAL<br>
+            <span style="color:#FFD700">PROTOCOL:</span> PAGERANK-V2<br>
+            <span style="color:#FFD700">DATE:</span> 2025-11-26
+        </div>
+    </div>
+""", unsafe_allow_html=True)
 
 
 # ==========================
@@ -17,32 +136,32 @@ st.set_page_config(layout="wide", page_title="DB UrbanPulse")
 # ==========================
 def get_traffic_color(delay_min):
     if delay_min < 1:
-        return "#00cc66"
+        return "#00FF00"
     elif delay_min < 5:
-        return "#aadd22"
+        return "#ADFF2F"
     elif delay_min < 15:
-        return "#ffcc00"
+        return "#FFFF00"
     elif delay_min < 30:
-        return "#ff6600"
+        return "#FF4500"
     elif delay_min < 60:
-        return "#cc0000"
+        return "#FF0000"
     else:
-        return "#9900cc"
+        return "#FF00FF"
 
 
 def get_traffic_color_rgb(delay_min):
     if delay_min < 1:
-        return [0, 204, 102]
+        return [0, 255, 0]
     elif delay_min < 5:
-        return [170, 221, 34]
+        return [173, 255, 47]
     elif delay_min < 15:
-        return [255, 204, 0]
+        return [255, 255, 0]
     elif delay_min < 30:
-        return [255, 102, 0]
+        return [255, 69, 0]
     elif delay_min < 60:
-        return [204, 0, 0]
+        return [255, 0, 0]
     else:
-        return [153, 0, 204]
+        return [255, 0, 255]
 
 
 # ==========================
@@ -50,39 +169,31 @@ def get_traffic_color_rgb(delay_min):
 # ==========================
 @st.cache_resource
 def load_static_resources():
-    """
-    Load heavy static assets (API client, Algorithm system).
-    """
     api = TransportAPI()
     system = TrafficSystem()
     return api, system
 
 
 try:
-    with st.spinner("Initializing Map Engine & Coordinate DB..."):
+    with st.spinner("INITIALIZING MAINFRAME..."):
         api, system = load_static_resources()
 except Exception as e:
-    st.error(f"Failed to load static resources: {e}")
+    st.error(f"SYSTEM FAILURE: {e}")
     st.stop()
 
 
 # ==========================
 # 2. Dynamic Data Loading
 # ==========================
-# 关键修改：ttl=3600 (1小时)。这意味着演示期间它绝不会自动刷新卡顿！
-# 只有当你点击"Refresh Data"按钮时，它才会更新。
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_realtime_data():
     snapshot = {}
     stations = sorted(api.target_stations.items())
 
-    # 使用 st.status 代替 progress bar，体验更流畅
-    with st.status("Fetching Real-time Data...", expanded=True) as status:
+    with st.status("ESTABLISHING UPLINK...", expanded=True) as status:
         total = len(stations)
         for idx, (name, sid) in enumerate(stations):
-            # 给用户一点文字反馈，让他知道没死机
-            status.write(f"Syncing {name}...")
-
+            status.write(f"Scanning Sector: {name}...")
             coords = api.get_coords(name)
             if not coords: continue
 
@@ -97,7 +208,7 @@ def fetch_realtime_data():
                 "rank": rank,
                 "impact": impact
             }
-        status.update(label="Data Sync Complete!", state="complete", expanded=False)
+        status.update(label="DATA SYNCHRONIZED", state="complete", expanded=False)
 
     return snapshot
 
@@ -105,34 +216,53 @@ def fetch_realtime_data():
 try:
     data = fetch_realtime_data()
 except Exception as e:
-    st.error(f"Real-time sync failed: {e}")
+    st.error(f"LINK FAILED: {e}")
     data = {}
 
 if "selected_station" not in st.session_state:
     st.session_state.selected_station = None
 
 # ==========================
-# 3. Sidebar Navigation
+# 3. Sidebar Navigation (Modified for Cat Image)
 # ==========================
 with st.sidebar:
-    st.title("🚆 UrbanPulse")
-    st.markdown("### Railway Resilience Analysis")
+    # --- 新增布局：星星 + 猫猫 并排 ---
+    c1, c2 = st.columns([1, 2], gap="small")
 
-    # 刷新按钮：只有点击这里，才会触发加载
-    if st.button("🔄 Refresh Data Now"):
+    with c1:
+        # 垂直居中的大红星
+        st.markdown(
+            "<h1 style='text-align: center; color: #CD0000; font-size: 50px; margin: 0; padding-top: 10px;'>★</h1>",
+            unsafe_allow_html=True)
+
+    with c2:
+        # 显示你的猫猫图片
+        # 确保图片文件名完全一致！
+        img_path = "afe0a9295697727f98750710dd47056e.jpg"
+        if os.path.exists(img_path):
+            st.image(img_path, width=110)
+        else:
+            st.warning("Cat img not found")
+
+    st.markdown("<h3 style='text-align: center; color: #FFD700; margin-top: -10px;'>OPERATIONS BUREAU</h3>",
+                unsafe_allow_html=True)
+    st.markdown("---")
+
+    if st.button("🔄 SYNC DATA"):
         fetch_realtime_data.clear()
         st.rerun()
 
-    mode = st.radio("View Mode", ["🗺️ 2D Monitor", "🌐 3D Perspective", "📊 Data Insights"], index=0)
+    st.markdown("<br>", unsafe_allow_html=True)
+    mode = st.radio("VIEW MODE", ["🗺️ TACTICAL MAP (2D)", "🌐 GLOBAL HOLOGRAPH (3D)", "📊 INTEL REPORT"], index=0)
 
-    st.divider()
+    st.markdown("---")
 
-    if mode != "📊 Data Insights":
-        st.subheader("📍 Quick Locate")
+    if mode != "📊 INTEL REPORT":
+        st.markdown("#### 📍 SECTOR SELECTOR")
         station_names = list(data.keys())
-        selected = st.selectbox("Select Station", ["- Global View -"] + station_names)
+        selected = st.selectbox("Select Station", ["- GLOBAL OVERVIEW -"] + station_names, label_visibility="collapsed")
 
-        if selected != "- Global View -" and selected != st.session_state.selected_station:
+        if selected != "- GLOBAL OVERVIEW -" and selected != st.session_state.selected_station:
             st.session_state.selected_station = selected
             st.rerun()
 
@@ -140,23 +270,38 @@ with st.sidebar:
             node = st.session_state.selected_station
             info = data.get(node)
             if info:
-                st.metric("Current Delay", f"{info['avg_delay']:.1f} min")
-                st.metric("Impact Index", f"{info['impact']:.1f}")
-                st.caption("Departing Trains:")
+                # 选中的卡片样式
+                st.markdown(f"""
+                <div style="border: 2px solid #FFD700; padding: 10px; background: #330000;">
+                    <small style="color:#FFD700;">TARGET SECTOR</small><br>
+                    <b style="font-size:1.2em; color:#FFF;">{node.upper()}</b>
+                </div>
+                """, unsafe_allow_html=True)
 
+                c1, c2 = st.columns(2)
+                c1.metric("LATENCY", f"{info['avg_delay']:.1f}m")
+                c2.metric("IMPACT", f"{info['impact']:.1f}")
+
+                st.markdown("#### TRAFFIC LOG")
                 for train in info['details']:
                     if not train['dest_coords']: continue
 
                     delay_val = train['delay']
-                    icon = "🔴" if delay_val > 5 else "🟢"
-                    st.write(f"{icon} **{train['line']}** → {train['to']} (+{delay_val:.0f} min)")
+                    css_class = "status-critical" if delay_val > 5 else "status-normal"
+                    time_str = f"+{delay_val:.0f}m" if delay_val > 0 else "NOMINAL"
+
+                    st.markdown(f"""
+                    <div class="train-list-item {css_class}">
+                        <b>{train['line']}</b> » {train['to']} <span style="float:right;">{time_str}</span>
+                    </div>
+                    """, unsafe_allow_html=True)
 
 # ==========================
 # 4. Main View Logic
 # ==========================
 
-if mode == "🗺️ 2D Monitor":
-    st.header("Real-time Network Monitor (2D)")
+if mode == "🗺️ TACTICAL MAP (2D)":
+    # 2D 视图逻辑
 
     map_center = [51.1657, 10.4515]
     zoom = 6
@@ -168,16 +313,14 @@ if mode == "🗺️ 2D Monitor":
 
     m = folium.Map(location=map_center, zoom_start=zoom, tiles="CartoDB dark_matter", min_zoom=6)
 
-    # A. Static Background (OpenRailwayMap Online Layer)
     folium.TileLayer(
         tiles="https://{s}.tiles.openrailwaymap.org/standard/{z}/{x}/{y}.png",
         attr='OpenRailwayMap',
         name="Rail Network",
         overlay=True,
-        opacity=0.4
+        opacity=0.3
     ).add_to(m)
 
-    # B. Dynamic Points
     for name, info in data.items():
         if not info['pos']: continue
         is_selected = (name == st.session_state.selected_station)
@@ -186,10 +329,9 @@ if mode == "🗺️ 2D Monitor":
 
         folium.CircleMarker(
             location=info['pos'], radius=radius, color=color, fill=True, fill_color=color,
-            fill_opacity=1.0 if is_selected else 0.8, tooltip=f"{name} (+{info['avg_delay']:.0f}min)", popup=None
+            fill_opacity=1.0 if is_selected else 0.8, tooltip=f"{name} (+{info['avg_delay']:.0f}m)", popup=None
         ).add_to(m)
 
-    # C. Dynamic Lines
     if st.session_state.selected_station:
         node = st.session_state.selected_station
         info = data.get(node)
@@ -200,48 +342,38 @@ if mode == "🗺️ 2D Monitor":
                 if not end: continue
                 real_shape = train.get('real_shape')
                 line_color = get_traffic_color(train['delay'])
-
-                tooltip_text = f"{train['line']} -> {train['to']} (+{train['delay']:.0f} min)"
+                tooltip_text = f"{train['line']} >> {train['to']}"
 
                 if real_shape:
-                    folium.PolyLine(locations=real_shape, color=line_color, weight=4, opacity=0.9,
+                    folium.PolyLine(locations=real_shape, color=line_color, weight=3, opacity=0.9,
                                     tooltip=tooltip_text).add_to(m)
                 else:
-                    folium.PolyLine(locations=[start, end], color=line_color, weight=2, opacity=0.8, dash_array='5,10',
+                    folium.PolyLine(locations=[start, end], color=line_color, weight=2, opacity=0.7, dash_array='5,10',
                                     tooltip=tooltip_text).add_to(m)
 
-    output = st_folium(m, width=1400, height=800, key="folium_map")
+    st_folium(m, width=1400, height=800, key="folium_map")
 
-    if output['last_object_clicked']:
-        clicked = output['last_object_clicked']
-        if 'tooltip' in clicked:
-            name = clicked['tooltip'].split(" (")[0]
-            if name in data and st.session_state.selected_station != name:
-                st.session_state.selected_station = name
-                st.rerun()
-
-elif mode == "🌐 3D Perspective":
-    st.header("3D Network Perspective")
-    st.caption("Visualizing long-distance connections and delay propagation using ArcLayer")
+elif mode == "🌐 GLOBAL HOLOGRAPH (3D)":
     deck = create_3d_map(data, st.session_state.selected_station)
     st.pydeck_chart(deck)
 
-elif mode == "📊 Data Insights":
-    st.header("Network Resilience Report")
+elif mode == "📊 INTEL REPORT":
+    st.markdown("### 📊 NETWORK RESILIENCE INTELLIGENCE")
+
     table_data = []
     for name, info in data.items():
         table_data.append({
-            "Station": name,
-            "PageRank": info['rank'],
-            "Delay (min)": info['avg_delay'],
-            "Impact Score": info['impact']
+            "SECTOR": name,
+            "IMPORTANCE (PageRank)": info['rank'],
+            "LATENCY (min)": info['avg_delay'],
+            "IMPACT SCORE": info['impact']
         })
-    df = pd.DataFrame(table_data).sort_values(by="Impact Score", ascending=False)
+    df = pd.DataFrame(table_data).sort_values(by="IMPACT SCORE", ascending=False)
 
     c1, c2 = st.columns([2, 1])
     with c1:
-        st.subheader("💥 Critical Nodes Ranking")
-        st.dataframe(df.style.background_gradient(subset=['Impact Score'], cmap='Reds'), use_container_width=True)
+        st.markdown("#### ⚠️ CRITICAL NODES")
+        st.dataframe(df.style.background_gradient(subset=['IMPACT SCORE'], cmap='Reds'), use_container_width=True)
     with c2:
-        st.subheader("📉 Delay Distribution")
-        st.bar_chart(df.set_index("Station")['Delay (min)'])
+        st.markdown("#### 📉 LATENCY DISTRIBUTION")
+        st.bar_chart(df.set_index("SECTOR")['LATENCY (min)'], color="#CD0000")
