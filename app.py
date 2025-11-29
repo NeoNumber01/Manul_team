@@ -37,7 +37,7 @@ from src.viz import (
 from src.ui import station_picker
 
 st.set_page_config(
-    page_title="Transit Knowledge Graph Demo",
+    page_title="RailBoard",
     layout="wide",
     page_icon="★",
     initial_sidebar_state="expanded",
@@ -178,6 +178,20 @@ def inject_custom_css() -> None:
         div[data-testid="stMetric"] div[data-testid="stMetricValue"] {
             color: #FFFFFF !important;
             font-size: 1.5rem;
+        }
+        /* Force first nav entry label to RailBoard */
+        div[data-testid="stSidebarNav"] li:first-of-type a {
+            position: relative;
+        }
+        div[data-testid="stSidebarNav"] li:first-of-type a span {
+            visibility: hidden;
+        }
+        div[data-testid="stSidebarNav"] li:first-of-type a span::after {
+            content: "RailBoard";
+            visibility: visible;
+            position: absolute;
+            left: 0;
+            top: 0;
         }
         footer {visibility: hidden;}
         </style>
@@ -391,7 +405,7 @@ def main() -> None:
         """
         <div class="header-container">
             <div>
-                <div class="header-title">CENTRAL RAILWAY COMMAND</div>
+                <div class="header-title">RAILBOARD</div>
                 <div class="header-subtitle">State Infrastructure Monitoring Bureau | Section: DE-GRID</div>
             </div>
             <div style="text-align:right; font-family:'Courier New'; font-size: 12px; color:#FFFFFF;">
@@ -406,8 +420,6 @@ def main() -> None:
 
     st.sidebar.markdown("### OPERATIONS BUREAU", unsafe_allow_html=True)
     st.sidebar.markdown("---")
-    st.sidebar.markdown("#### Data source", unsafe_allow_html=True)
-    st.sidebar.info(f"Bundled GTFS: {DEFAULT_GTFS_PATH}")
 
     kg: Graph | None = None
     default_query = GTFS_SPARQL
@@ -447,26 +459,12 @@ def main() -> None:
             if loaded_from_cache
             else f"Built GTFS KG and saved to cache: {cache_path}"
         )
-        if edges_cache_path:
-            if edges_from_cache:
-                status_msg += f" (edges from cache: {edges_cache_path})"
-            elif edges_built:
-                status_msg += " (edges built and cached)"
+        # Status text intentionally omitted for cleaner UI
     except Exception as exc:
         st.error(f"Failed to load GTFS KG: {exc}")
         st.stop()
 
-    st.success(status_msg)
-    st.write(f"Using: **GTFS KG (bundled)** | GTFS path: {DEFAULT_GTFS_PATH} | Triples: **{len(kg)}**")
-    if edge_warning:
-        st.warning(edge_warning)
-    if edges_cache_path:
-        cache_state = (
-            "from cache"
-            if edges_from_cache
-            else ("built this run" if edges_df is not None else "missing (using KG edges)")
-        )
-        st.write(f"Edges cache: {edges_cache_path} ({cache_state})")
+    # Suppress verbose cache/status banners for a cleaner layout
 
     # Cache paths for graph and pagerank
     cache_dir = DATA_DIR / "cache"
