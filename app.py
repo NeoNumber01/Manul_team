@@ -36,7 +36,12 @@ from src.viz import (
 )
 from src.ui import station_picker
 
-st.set_page_config(page_title="Transit Knowledge Graph Demo", layout="wide")
+st.set_page_config(
+    page_title="Transit Knowledge Graph Demo",
+    layout="wide",
+    page_icon="★",
+    initial_sidebar_state="expanded",
+)
 
 DATA_DIR = Path(__file__).parent / "data"
 KG_CACHE_PATH = DATA_DIR / "kg_demo.ttl"
@@ -96,6 +101,89 @@ WHERE {
 }
 LIMIT 100
 """
+
+
+def inject_custom_css() -> None:
+    """Apply the retro command-center styling from Urban Pulse."""
+    st.markdown(
+        """
+        <style>
+        @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap');
+        html, body, [class*="css"] {
+            font-family: 'Share+Tech+Mono', 'Share Tech Mono', monospace;
+        }
+        .header-container {
+            background-color: #8B0000;
+            padding: 1.2rem;
+            border: 2px solid #FFD700;
+            margin-bottom: 18px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            box-shadow: 4px 4px 0px #000;
+        }
+        .header-title {
+            color: #FFFFFF;
+            font-size: 24px;
+            font-weight: 900;
+            letter-spacing: 1.5px;
+            text-transform: uppercase;
+        }
+        .header-subtitle {
+            color: #FFFFFF;
+            font-size: 12px;
+            text-transform: uppercase;
+        }
+        section[data-testid="stSidebar"] {
+            background-color: #080808;
+            border-right: 2px solid #8B0000;
+        }
+        section[data-testid="stSidebar"] * {
+            color: #FFFFFF !important;
+        }
+        button, [data-testid="baseButton-secondary"], [data-testid="baseButton-primary"] {
+            border-radius: 0px !important;
+            border: 1px solid #FFD700 !important;
+            background-color: #330000 !important;
+            color: #FFD700 !important;
+            text-transform: uppercase;
+            font-weight: bold;
+        }
+        button:hover {
+            background-color: #FFD700 !important;
+            color: #000000 !important;
+        }
+        .train-list-item {
+            padding: 10px;
+            margin-bottom: 8px;
+            background-color: #1A1A1A;
+            border: 1px solid #333;
+            border-left: 4px solid #333;
+            font-size: 0.9rem;
+        }
+        .status-critical { border-left-color: #FF0000; color: #FFaaaa; }
+        .status-normal { border-left-color: #00FF00; color: #ccffcc; }
+        div[data-testid="stMetric"] {
+            background-color: #1E1E1E;
+            border: 1px solid #555;
+            border-left: 5px solid #FFD700;
+            padding: 10px;
+            border-radius: 0px !important;
+        }
+        div[data-testid="stMetric"] label {
+            color: #FFD700 !important;
+            font-size: 0.8rem;
+            text-transform: uppercase;
+        }
+        div[data-testid="stMetric"] div[data-testid="stMetricValue"] {
+            color: #FFFFFF !important;
+            font-size: 1.5rem;
+        }
+        footer {visibility: hidden;}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def stops_df_from_kg(kg: Graph) -> pd.DataFrame:
@@ -298,9 +386,27 @@ def load_gtfs_kg(
 
 
 def main() -> None:
-    st.title("Transit Knowledge Graph — Minimal Demo (RDFLib + SPARQL)")
+    inject_custom_css()
+    st.markdown(
+        """
+        <div class="header-container">
+            <div>
+                <div class="header-title">CENTRAL RAILWAY COMMAND</div>
+                <div class="header-subtitle">State Infrastructure Monitoring Bureau | Section: DE-GRID</div>
+            </div>
+            <div style="text-align:right; font-family:'Courier New'; font-size: 12px; color:#FFFFFF;">
+                <span style="color:#FFD700">STATUS:</span> OPERATIONAL<br>
+                <span style="color:#FFD700">PROTOCOL:</span> PAGERANK-V2<br>
+                <span style="color:#FFD700">DATE:</span> 2025-11-26
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-    st.sidebar.subheader("Data source")
+    st.sidebar.markdown("### OPERATIONS BUREAU", unsafe_allow_html=True)
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("#### Data source", unsafe_allow_html=True)
     st.sidebar.info(f"Bundled GTFS: {DEFAULT_GTFS_PATH}")
 
     kg: Graph | None = None
@@ -442,7 +548,7 @@ def main() -> None:
                 st.session_state["show_edges"] = False
                 show_edges = False
 
-    maps_tab, stats_tab, sparql_tab = st.tabs(["Maps", "Statistics", "SPARQL"])
+    maps_tab, sparql_tab = st.tabs(["Maps", "SPARQL"])
 
     with maps_tab:
         st.subheader("Network Overview")
@@ -759,9 +865,6 @@ def main() -> None:
                                         }
                                     )
                                 st.dataframe(hub_rows, use_container_width=True)
-
-    with stats_tab:
-        st.info("Coming soon")
 
     with sparql_tab:
         st.subheader("Local SPARQL Query")
