@@ -18,7 +18,7 @@ from src.realtime.urban_viz import create_3d_map
 
 st.set_page_config(
     layout="wide",
-    page_title="Central Command",
+    page_title="RailBoard",
     page_icon="★",
     initial_sidebar_state="expanded",
 )
@@ -96,6 +96,20 @@ def inject_custom_css() -> None:
         }
         .status-critical { border-left-color: #FF0000; color: #FFaaaa; }
         .status-normal { border-left-color: #00FF00; color: #ccffcc; }
+        /* Force first nav entry label to RailBoard */
+        div[data-testid="stSidebarNav"] li:first-of-type a {
+            position: relative;
+        }
+        div[data-testid="stSidebarNav"] li:first-of-type a span {
+            visibility: hidden;
+        }
+        div[data-testid="stSidebarNav"] li:first-of-type a span::after {
+            content: "RailBoard";
+            visibility: visible;
+            position: absolute;
+            left: 0;
+            top: 0;
+        }
         footer {visibility: hidden;}
         </style>
         """,
@@ -109,7 +123,7 @@ st.markdown(
     """
     <div class="header-container">
         <div>
-            <div class="header-title">CENTRAL RAILWAY COMMAND</div>
+            <div class="header-title">RAILBOARD</div>
             <div class="header-subtitle">State Infrastructure Monitoring Bureau | Section: DE-GRID</div>
         </div>
         <div style="text-align:right; font-family:'Courier New'; font-size: 12px; color:#FFFFFF;">
