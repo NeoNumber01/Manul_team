@@ -213,84 +213,81 @@ def fetch_realtime_data(api: TransportAPI, system: TrafficSystem) -> dict:
     return snapshot
 
 
-def render_sidebar(data: dict, mode: str) -> None:
+def render_sidebar_header(mode: str) -> tuple[bool, str]:
     st.markdown("### OPERATIONS BUREAU", unsafe_allow_html=True)
     st.markdown("---")
 
-    if st.button("🔄 SYNC DATA"):
-        fetch_realtime_data.clear()
-        st.rerun()
+    sync_clicked = st.button("🔄 SYNC DATA", key="sync_data")
 
     st.markdown("<br>", unsafe_allow_html=True)
     choices = ["🗺️ TACTICAL MAP (2D)", "🌐 GLOBAL HOLOGRAPH (3D)", "📊 INTEL REPORT"]
     default_index = choices.index(mode) if mode in choices else 0
-    mode_choice = st.radio("VIEW MODE", choices, index=default_index)
+    mode_choice = st.radio("VIEW MODE", choices, index=default_index, key="view_mode")
 
     st.markdown("---")
+    return sync_clicked, mode_choice
 
-    if mode_choice != mode:
-        st.session_state["mode"] = mode_choice
-        st.rerun()
 
-    if mode_choice != "📊 INTEL REPORT":
-        st.markdown("#### 📍 SECTOR SELECTOR")
-        station_names = list(data.keys())
-        selected = st.selectbox("Select Station", ["- GLOBAL OVERVIEW -"] + station_names, label_visibility="collapsed")
-        prev_sel = st.session_state.get("selected_station")
-        if selected == "- GLOBAL OVERVIEW -":
-            if prev_sel is not None:
-                st.session_state["selected_station"] = None
-                st.rerun()
-        elif selected != prev_sel:
-            st.session_state["selected_station"] = selected
-            st.rerun()
+def render_sidebar_station_section(data: dict, mode: str) -> None:
+    if mode == "📊 INTEL REPORT":
+        return
 
-        sel = st.session_state.get("selected_station")
-        if sel:
-            info = data.get(sel)
-            if info:
-                st.markdown(
-                    f"""
-                    <div style="border: 2px solid #FFD700; padding: 10px; background: #330000;">
-                        <small style="color:#FFD700;">TARGET SECTOR</small><br>
-                        <b style="font-size:1.2em; color:#FFF;">{sel.upper()}</b>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
+    st.markdown("#### 📍 SECTOR SELECTOR")
+    station_names = list(data.keys())
+    selected = st.selectbox("Select Station", ["- GLOBAL OVERVIEW -"] + station_names, label_visibility="collapsed")
+    prev_sel = st.session_state.get("selected_station")
+    if selected == "- GLOBAL OVERVIEW -":
+        if prev_sel is not None:
+            st.session_state["selected_station"] = None
+    elif selected != prev_sel:
+        st.session_state["selected_station"] = selected
 
-                c1, c2 = st.columns(2)
-                c1.metric("LATENCY", f"{info['avg_delay']:.1f}m")
-                c2.metric("IMPACT", f"{info['impact']:.1f}")
+    sel = st.session_state.get("selected_station")
+    if sel:
+        info = data.get(sel)
+        if info:
+            st.markdown(
+                f"""
+                <div style="border: 2px solid #FFD700; padding: 10px; background: #330000;">
+                    <small style="color:#FFD700;">TARGET SECTOR</small><br>
+                    <b style="font-size:1.2em; color:#FFF;">{sel.upper()}</b>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
-                st.markdown("#### TRAFFIC LOG")
-                incoming_trains = info.get("incoming") or []
-                outgoing_trains = info.get("outgoing") or info.get("details") or []
+            c1, c2 = st.columns(2)
+            c1.metric("LATENCY", f"{info['avg_delay']:.1f}m")
+            c2.metric("IMPACT", f"{info['impact']:.1f}")
 
-                def render_trains(title: str, trains: list[dict], arrow: str, get_label):
-                    st.markdown(f"**{title}**")
-                    if not trains:
-                        st.caption("No data.")
-                        return
-                    for train in trains:
-                        has_coords = train.get("dest_coords") if arrow == "»" else train.get("origin_coords")
-                        if not has_coords:
-                            continue
-                        delay_val = train.get("delay", 0)
-                        css_class = "status-critical" if delay_val > 5 else "status-normal"
-                        time_str = f"+{delay_val:.0f}m" if delay_val > 0 else "NOMINAL"
-                        label = get_label(train)
-                        st.markdown(
-                            f"""
-                            <div class="train-list-item {css_class}">
-                                <b>{train['line']}</b> {arrow} {label} <span style="float:right;">{time_str}</span>
-                            </div>
-                            """,
-                            unsafe_allow_html=True,
-                        )
+            st.markdown("#### TRAFFIC LOG")
+            incoming_trains = info.get("incoming") or []
+            outgoing_trains = info.get("outgoing") or info.get("details") or []
 
-                render_trains("Incoming trains", incoming_trains, "«", lambda t: t.get("origin", "Unknown"))
-                render_trains("Outgoing trains", outgoing_trains, "»", lambda t: t.get("to", "Unknown"))
+            def render_trains(title: str, trains: list[dict], arrow: str, get_label):
+                st.markdown(f"**{title}**")
+                if not trains:
+                    st.caption("No data.")
+                    return
+                for train in trains:
+                    has_coords = train.get("dest_coords") if arrow == "»" else train.get("origin_coords")
+                    if not has_coords:
+                        continue
+                    delay_val = train.get("delay", 0)
+                    css_class = "status-critical" if delay_val > 5 else "status-normal"
+                    time_str = f"+{delay_val:.0f}m" if delay_val > 0 else "NOMINAL"
+                    label = get_label(train)
+                    st.markdown(
+                        f"""
+                        <div class="train-list-item {css_class}">
+                            <b>{train['line']}</b> {arrow} {label} <span style="float:right;">{time_str}</span>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+
+            render_trains("Incoming trains", incoming_trains, "«", lambda t: t.get("origin", "Unknown"))
+            render_trains("Outgoing trains", outgoing_trains, "»", lambda t: t.get("to", "Unknown"))
 
 
 def render_map(data: dict) -> None:
@@ -417,6 +414,16 @@ def main() -> None:
     if "selected_station" not in st.session_state:
         st.session_state["selected_station"] = None
 
+    sidebar = st.sidebar.container()
+    with sidebar:
+        sync_clicked, mode_choice = render_sidebar_header(st.session_state["mode"])
+
+    if mode_choice != st.session_state["mode"]:
+        st.session_state["mode"] = mode_choice
+
+    if sync_clicked:
+        fetch_realtime_data.clear()
+
     try:
         api, system = load_static_resources()
         data = fetch_realtime_data(api, system)
@@ -424,8 +431,8 @@ def main() -> None:
         st.error(f"数据加载异常: {exc}")
         data = {}
 
-    with st.sidebar:
-        render_sidebar(data, st.session_state["mode"])
+    with sidebar:
+        render_sidebar_station_section(data, st.session_state["mode"])
 
     if not data:
         st.warning("没有可用的实时数据。请稍后重试。")
@@ -438,8 +445,34 @@ def main() -> None:
     elif mode == "🌐 GLOBAL HOLOGRAPH (3D)":
         st.header("GLOBAL HOLOGRAPH (3D)")
         st.caption("Visualizing long-distance connections and delay propagation.")
-        deck = create_3d_map(data, st.session_state.get("selected_station"))
+        if "train_anim_t" not in st.session_state:
+            st.session_state["train_anim_t"] = 0.0
+
+        selected_station = st.session_state.get("selected_station")
+        global_overview = selected_station is None
+
+        if global_overview:
+            animate = False
+            st.session_state["train_anim_t"] = 0.0
+            st.caption("Global overview: animation disabled. Select a station to animate trains.")
+        else:
+            animate = st.checkbox("Animate trains", value=True, key="animate_trains")
+            speed = st.slider("⏱️ Animation speed", 0.002, 0.08, 0.015, step=0.002, key="animate_speed")
+
+        t_val = st.session_state["train_anim_t"]
+        if animate:
+            t_val = (t_val + speed) % 1.0
+            st.session_state["train_anim_t"] = t_val
+        else:
+            t_val = 0.0
+            st.session_state["train_anim_t"] = t_val
+
+        deck = create_3d_map(data, selected_station, t=t_val)
         st.pydeck_chart(deck)
+
+        if animate:
+            time.sleep(0.03)
+            st.rerun()
     else:
         render_data_insights(data)
 
