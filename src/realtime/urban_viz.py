@@ -71,8 +71,8 @@ def create_3d_map(station_data, selected_station=None, t: float = 0.0):
         data=train_icon_data,
         get_icon="icon",
         get_position="coordinates",
-        get_size=4,
-        size_scale=25,
+        get_size=3,
+        size_scale=18,
         pickable=True,
         icon_atlas="https://i.imgur.com/xScSkMH.png",
         icon_mapping={
