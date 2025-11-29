@@ -5,3 +5,9 @@ networkx
 numpy
 fastapi
 uvicorn
+folium
+polyline
+requests
+scipy
+streamlit-folium
+matplotlib
