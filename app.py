@@ -6,7 +6,7 @@ import time
 import os
 
 # Core Modules
-from data.api_client import TransportAPI
+from data.api_client import TransportAPI, compute_progress, interpolate_on_line
 from core.traffic_system import TrafficSystem
 from viz import create_3d_map
 
@@ -198,6 +198,7 @@ def fetch_realtime_data():
             if not coords: continue
 
             avg_delay, details = api.get_realtime_departures(sid)
+            avg_arrival_delay, arrivals = api.get_realtime_arrivals(sid)
             rank = system.get_rank(name)
             impact = avg_delay * rank * 1000
 
@@ -205,6 +206,7 @@ def fetch_realtime_data():
                 "pos": coords,
                 "avg_delay": avg_delay,
                 "details": details,
+                "arrivals": arrivals,
                 "rank": rank,
                 "impact": impact
             }
@@ -283,19 +285,41 @@ with st.sidebar:
                 c2.metric("IMPACT", f"{info['impact']:.1f}")
 
                 st.markdown("#### TRAFFIC LOG")
-                for train in info['details']:
-                    if not train['dest_coords']: continue
-
-                    delay_val = train['delay']
-                    css_class = "status-critical" if delay_val > 5 else "status-normal"
-                    time_str = f"+{delay_val:.0f}m" if delay_val > 0 else "NOMINAL"
-
-                    st.markdown(f"""
-                    <div class="train-list-item {css_class}">
-                        <b>{train['line']}</b> » {train['to']} <span style="float:right;">{time_str}</span>
-                    </div>
-                    """, unsafe_allow_html=True)
-
+                
+                # ARRIVALS
+                st.markdown("**INCOMING TRAINS:**")
+                arrivals = info.get('arrivals', [])
+                if arrivals:
+                    for train in arrivals:
+                        delay_val = train['delay']
+                        css_class = "status-critical" if delay_val > 5 else "status-normal"
+                        time_str = f"+{delay_val:.0f}m" if delay_val > 0 else "NOMINAL"
+                        st.markdown(f"""
+                        <div class="train-list-item {css_class}">
+                            <b>{train['line']}</b> ◄ {train['from']} <span style="float:right;">{time_str}</span>
+                        </div>
+                        """, unsafe_allow_html=True)
+                else:
+                    st.markdown("<small style='color:#888;'>No incoming trains</small>", unsafe_allow_html=True)
+                
+                st.markdown("---")
+                
+                # DEPARTURES
+                st.markdown("**OUTGOING TRAINS:**")
+                departures = info.get('details', [])
+                if departures:
+                    for train in departures:
+                        if not train['dest_coords']: continue
+                        delay_val = train['delay']
+                        css_class = "status-critical" if delay_val > 5 else "status-normal"
+                        time_str = f"+{delay_val:.0f}m" if delay_val > 0 else "NOMINAL"
+                        st.markdown(f"""
+                        <div class="train-list-item {css_class}">
+                            <b>{train['line']}</b> » {train['to']} <span style="float:right;">{time_str}</span>
+                        </div>
+                        """, unsafe_allow_html=True)
+                else:
+                    st.markdown("<small style='color:#888;'>No outgoing trains</small>", unsafe_allow_html=True)
 # ==========================
 # 4. Main View Logic
 # ==========================
@@ -337,6 +361,8 @@ if mode == "🗺️ TACTICAL MAP (2D)":
         info = data.get(node)
         if info:
             start = info['pos']
+            
+            # DEPARTURES (outgoing trains)
             for train in info['details']:
                 end = train['dest_coords']
                 if not end: continue
@@ -350,6 +376,56 @@ if mode == "🗺️ TACTICAL MAP (2D)":
                 else:
                     folium.PolyLine(locations=[start, end], color=line_color, weight=2, opacity=0.7, dash_array='5,10',
                                     tooltip=tooltip_text).add_to(m)
+                
+                # Current position marker for departures
+                current_pos = train.get('current_coords')
+                if current_pos:
+                    folium.CircleMarker(
+                        location=current_pos, radius=6, color=line_color, fill=True, fill_color=line_color,
+                        fill_opacity=0.9, tooltip=f"TRAIN: {train['line']} (current position)"
+                    ).add_to(m)
+            
+            # ARRIVALS (incoming trains)
+            arrivals = info.get('arrivals', [])
+            for train in arrivals:
+                origin = train.get('origin_coords')
+                if not origin or not start: 
+                    continue
+
+                # --- CHỖ CHÈN MÃ HIỂN THỊ VỊ TRÍ HIỆN TẠI ---
+                eta = train.get('eta_timestamp')  # lấy từ API
+                progress = compute_progress(eta_timestamp=eta)
+                current_pos = interpolate_on_line(origin, start, progress)
+
+                folium.CircleMarker(
+                    location=current_pos,
+                    radius=5,
+                    color=get_traffic_color(train['delay']),
+                    fill=True,
+                    fill_color=get_traffic_color(train['delay']),
+                    fill_opacity=1.0,
+                    tooltip=f"{train['line']} << {train['from']}"
+                ).add_to(m)
+
+                # VẼ LINES NHƯ TRƯỚC
+                real_shape = train.get('real_shape')
+                line_color = get_traffic_color(train['delay'])
+                tooltip_text = f"{train['line']} << {train['from']}"
+
+                if real_shape:
+                    folium.PolyLine(locations=real_shape, color=line_color, weight=3, opacity=0.9,
+                                    tooltip=tooltip_text, dash_array='10,5').add_to(m)
+                else:
+                    folium.PolyLine(locations=[origin, start], color=line_color, weight=2, opacity=0.7, dash_array='10,5',
+                                    tooltip=tooltip_text).add_to(m)
+                
+                # Current position marker for arrivals
+                current_pos = train.get('current_coords')
+                if current_pos:
+                    folium.CircleMarker(
+                        location=current_pos, radius=6, color=line_color, fill=True, fill_color=line_color,
+                        fill_opacity=0.9, tooltip=f"TRAIN: {train['line']} (current position)"
+                    ).add_to(m)
 
     st_folium(m, width=1400, height=800, key="folium_map")
 
