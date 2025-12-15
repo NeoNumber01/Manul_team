@@ -1,3 +1,7 @@
+Quick start (Streamlit)
+Install deps inside the venv if needed: pip install streamlit pandas.
+Run the app: streamlit run app.py.
+Put your CSV files in data/ or upload one from the sidebar to see an instant preview and charts.
 # 🌸 Chiikawa Rail: Intelligent Railway Knowledge Graph & Routing System
 
 An advanced decision-support system that transforms raw transit data into a semantic **Knowledge Graph** to analyze network robustness and provide reliable routing recommendations.
