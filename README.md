@@ -2,7 +2,9 @@
 
 RailBoard is a public-transport decision-support prototype built for the first TUM Campus Heilbronn hackathon. It combines static GTFS schedule data, RDF knowledge graphs, graph algorithms, and live departure information into a Streamlit dashboard for exploring rail-network reliability.
 
-![RailBoard system architecture](docs/railboard-architecture.png)
+![RailBoard running locally](docs/railboard-runtime.png)
+
+The screenshot above was captured from the local Streamlit real-time monitoring page running on `localhost`.
 
 ## Highlights
 
